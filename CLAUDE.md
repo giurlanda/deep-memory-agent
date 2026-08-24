@@ -43,6 +43,10 @@ Factory for building LangChain deepagents equipped with episodic, semantic, and 
 
 - `.github/workflows/ci.yml` runs on every push to `main` and every PR: ruff lint + format check,
   `pytest` across the supported Python matrix, a `uv build` sanity check, and an mkdocs --strict build.
+  On pushes to `main` only, a `deploy-docs` job (gated on `lint`, `test`, `build`, and `docs`
+  succeeding) publishes the built `site/` directory to GitHub Pages via `actions/deploy-pages`.
+  Requires the repo's Pages source set to "GitHub Actions" (Settings → Pages) — a one-time,
+  non-workflow setup step.
 - `.github/workflows/publish.yml` runs when a `v*.*.*` tag is pushed: it verifies the tag matches
   `__version__` in `src/deep_memory_agent/__init__.py`, builds, and publishes to PyPI via trusted
   publishing (no stored token — the `pypi` GitHub environment must be configured with a PyPI
