@@ -23,6 +23,8 @@ dependencies = [
     "langchain>=1.3.15,<2.0",
     "langchain-core>=1.6,<2.0",
     "langgraph>=1.2,<2.0",
+    "pydantic>=2.7,<3.0",
+    "pyyaml>=6.0,<7.0",
 ]
 
 [project.optional-dependencies]
@@ -79,3 +81,9 @@ ignore = [
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
+
+[tool.ruff.lint.pylint]
+# The public surface is built out of keyword-only factory arguments; five is too
+# tight a budget for a factory that has to accept model, backend, prompt and
+# tool-shaping options at once.
+max-args = 9
