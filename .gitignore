@@ -9,3 +9,4 @@ build/
 site/
 .env
 .DS_Store
+memory/
