@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- CI now deploys the built MkDocs site to GitHub Pages on every push to `main`,
+  via a `deploy-docs` job gated on `lint`, `test`, `build`, and `docs` passing.
+
 ## [0.1.0] - 2026-08-24
 
 ### Added
