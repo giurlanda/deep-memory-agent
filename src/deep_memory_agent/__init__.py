@@ -37,7 +37,7 @@ from deep_memory_agent.scaffold import PROCEDURE_TEMPLATE, ensure_memory_tree
 from deep_memory_agent.store import MemoryHit, MemoryStore
 from deep_memory_agent.tools import build_recall_tools, build_write_tools
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 __all__ = [
     "MEMORY_ROOT",

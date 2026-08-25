@@ -124,6 +124,19 @@ supersedes what it contradicts.
 See [examples/](examples/) for runnable scripts, or the
 [docs](https://giurlanda.github.io/deep-memory-agent/).
 
+## Benchmark
+
+[`benchmark/`](benchmark/) holds a LongMemEval-style benchmark for the two
+agents. Unlike LongMemEval, which scores a retriever over a frozen chat log, it
+replays episodes **through the real manager agent** one session at a time, so
+extraction, supersession and consolidation are all part of what is measured —
+and failures are decomposed across those three stages rather than two.
+
+```bash
+uv sync --group benchmark
+uv run --group benchmark jupyter lab benchmark/run_benchmark.ipynb
+```
+
 ## Scope of this version
 
 Memory is file-based and retrieval is lexical (case-insensitive substring over

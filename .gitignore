@@ -10,3 +10,8 @@ site/
 .env
 .DS_Store
 memory/
+benchmark/longmemeval/data/
+benchmark/longmemeval/*.pdf
+benchmark/runs/
+examples/local*
+launch.json

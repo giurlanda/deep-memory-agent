@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-08-25
+
+### Added
+
+- A LongMemEval-style benchmark for the two memory agents, under `benchmark/`,
+  driven by `benchmark/run_benchmark.ipynb`. It replays episodes through the
+  real manager agent one session at a time, so extraction, supersession and
+  consolidation are part of what is measured — not a retriever over pre-loaded
+  facts — and decomposes failures across three stages (consolidation ×
+  retrieval × answer) rather than LongMemEval's two. Six question categories
+  come from the published LongMemEval datasets; `supersede-integrity` re-judges
+  the knowledge-update cases under a stricter prompt that fails a retired value
+  presented as current; `procedural-retrieval` and `non-repetition` come from a
+  generated corpus over an operational-domain ontology. ([#7])
+- A `benchmark` dependency group holding what the harness needs on top of the
+  package. It is not installed by `uv sync`, so CI and the published wheel are
+  unaffected.
+- `docs/benchmark.md`, and a `Benchmark` entry in the MkDocs nav.
+
+### Changed
+
+- `.gitignore` no longer excludes the whole `benchmark/` directory: the harness
+  is tracked, while the multi-gigabyte LongMemEval datasets, the paper PDF and
+  the run outputs stay out.
+
+[#7]: https://github.com/giurlanda/deep-memory-agent/issues/7
+
 ## [0.1.2] - 2026-08-25
 
 ### Added
