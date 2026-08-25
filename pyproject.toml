@@ -45,6 +45,16 @@ dev = [
     "pytest>=8.3",
     "ruff>=0.8",
 ]
+# Everything the benchmark under `benchmark/` needs on top of the package
+# itself. Kept out of `dev` so a plain `uv sync` — and CI — stays lean; install
+# with `uv sync --group benchmark`.
+benchmark = [
+    "ipykernel>=6.29",
+    "langchain-openai>=0.3",
+    "matplotlib>=3.9",
+    "pandas>=2.2",
+    "tqdm>=4.66",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -59,11 +69,14 @@ packages = ["src/deep_memory_agent"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+# `dma_bench` is not part of the published package, so it is not installed;
+# putting `benchmark/` on the path is what lets `tests/benchmark/` import it.
+pythonpath = ["benchmark"]
 
 [tool.ruff]
 target-version = "py312"
 line-length = 88
-src = ["src", "tests"]
+src = ["src", "tests", "benchmark"]
 
 [tool.ruff.lint]
 select = ["ALL"]
@@ -78,9 +91,24 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ANN", "D", "INP001", "PLC0415", "PLR2004", "S101", "SLF001", "TC"]
 "examples/*" = ["D", "INP001", "T201"]
+"benchmark/*" = [
+    "BLE001",   # the runner has to survive one case blowing up, whatever it raises
+    "PLC0415",  # heavy and optional imports are made where they are used
+    "PLR2004",  # thresholds and figure sizes read better inline than as constants
+    "RUF001",   # the three-stage decomposition is a cross product; "x" is not it
+    "RUF002",   # same, in the docstrings that explain it
+    "S311",     # sampling is about reproducibility, not cryptography
+    "T201",     # the runner reports progress on stdout
+]
+"*.ipynb" = ["D", "ANN", "E402", "ERA001", "INP001", "PLR2004", "S311", "T201"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
+
+[tool.ruff.lint.flake8-type-checking]
+# Pydantic resolves annotations at runtime, so its models must keep their
+# imports out of `if TYPE_CHECKING` blocks.
+runtime-evaluated-base-classes = ["pydantic.BaseModel"]
 
 [tool.ruff.lint.pylint]
 # The public surface is built out of keyword-only factory arguments; five is too
