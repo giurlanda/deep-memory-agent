@@ -4,6 +4,7 @@
 [![PyPI version](https://img.shields.io/pypi/v/deep-memory-agent)](https://pypi.org/project/deep-memory-agent/)
 [![Version](https://img.shields.io/github/v/tag/giurlanda/deep-memory-agent?sort=semver&label=version)](https://github.com/giurlanda/deep-memory-agent/tags)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
+[![Docs](https://img.shields.io/badge/docs-latest-blue.svg)](https://giurlanda.github.io/deep-memory-agent/)
 
 Factory for building LangChain deepagents equipped with episodic, semantic, and procedural memory.
 
@@ -16,8 +17,6 @@ The tree lives at the virtual path `/memory/`, served by a
 [deepagents](https://github.com/langchain-ai/deepagents) backend. No tool in
 this package touches the host filesystem directly, so the same agent runs
 unchanged against a directory on disk, ephemeral thread state, or a remote store.
-
-📖 **Documentation:** <https://giurlanda.github.io/deep-memory-agent/>
 
 ## Installation
 
