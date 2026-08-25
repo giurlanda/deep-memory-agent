@@ -110,8 +110,13 @@ exposes it as the `memory_consolidate` tool.
 ```python
 from deep_memory_agent import build_memory_backend, consolidate_memory
 
-result = consolidate_memory(build_memory_backend("./memory"), "claude-sonnet-5")
+backend = build_memory_backend("./memory", for_deep_agent=False)
+result = consolidate_memory(backend, "claude-sonnet-5")
 ```
+
+`for_deep_agent=False` is what makes the backend usable outside an agent: the
+default wiring parks non-memory paths in LangGraph thread state, which is only
+reachable from inside a graph execution.
 
 Episodes are never deleted: consolidation only adds durable knowledge and
 supersedes what it contradicts.

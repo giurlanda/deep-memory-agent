@@ -56,6 +56,16 @@ create_memory_manager_agent(model, backend=my_backend)
 `memory_dir` form builds: a `CompositeBackend` routing `/memory/` to a
 `FilesystemBackend` and leaving everything else on an ephemeral `StateBackend`.
 
+That ephemeral default only works inside a deep agent: `StateBackend` reads and
+writes through LangGraph, and raises outside a graph execution. Building the
+backend yourself for use outside one — consolidation from a cron job, a store
+you drive directly — needs `for_deep_agent=False`, which serves non-memory paths
+from an empty scratch directory instead:
+
+```python
+backend = build_memory_backend("./memory", for_deep_agent=False)
+```
+
 ## Why the search agent cannot write
 
 Withholding the write tools is not enough on its own — the built-in `write_file`,
@@ -76,7 +86,7 @@ from datetime import UTC, datetime, timedelta
 from deep_memory_agent import build_memory_backend, consolidate_memory
 
 result = consolidate_memory(
-    build_memory_backend("./memory"),
+    build_memory_backend("./memory", for_deep_agent=False),
     "claude-sonnet-5",
     since=datetime.now(tz=UTC) - timedelta(days=7),
 )
@@ -94,7 +104,7 @@ is useful for seeding memory, or for inspecting it in tests, without a model:
 ```python
 from deep_memory_agent import MemoryCategory, MemoryStore, build_memory_backend
 
-store = MemoryStore(build_memory_backend("./memory"))
+store = MemoryStore(build_memory_backend("./memory", for_deep_agent=False))
 store.ensure_tree()
 store.write(
     MemoryCategory.FACTS,
