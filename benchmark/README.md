@@ -104,6 +104,12 @@ uv run --group benchmark python -m dma_bench.generation.generator \
 shard routing, accumulated supersessions and repeated consolidation passes are
 actually exercised — the one thing the published datasets cannot offer.
 
+Generation shows one progress bar per category, counting **model calls** rather
+than cases: `large` is a few dozen cases but over a thousand calls, and a bar
+that moves twelve times in an hour says nothing useful. Finished bars stay on
+screen, so a run ends with one line per category and what it cost. Pass
+`--quiet` for non-interactive runs.
+
 ## Running
 
 ```bash

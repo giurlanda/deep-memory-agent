@@ -31,6 +31,7 @@ import argparse
 import json
 import random
 import sys
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -50,9 +51,17 @@ from dma_bench.generation.ontology import (
 from dma_bench.schema import Case, Session, Turn
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+
     from langchain_core.language_models import BaseChatModel
 
-__all__ = ["CORPUS_SHAPES", "CorpusShape", "generate_corpus", "write_corpus"]
+__all__ = [
+    "CORPUS_SHAPES",
+    "CorpusShape",
+    "calls_per_category",
+    "generate_corpus",
+    "write_corpus",
+]
 
 
 class CorpusShape(BaseModel):
@@ -164,6 +173,7 @@ def generate_corpus(
     categories: list[BenchCategory] | None = None,
     seed: int = 0,
     end_date: datetime | None = None,
+    progress: bool = True,
 ) -> list[Case]:
     """Generate a corpus of operational cases.
 
@@ -176,6 +186,12 @@ def generate_corpus(
             output is not deterministic, which is why the corpus is written to
             disk once and reused rather than regenerated per run.
         end_date: The day the questions are asked. Defaults to today.
+        progress: Show one `tqdm` bar per category. Each counts **model
+            calls**, not cases: a `large` corpus is a few dozen cases but well
+            over a thousand calls, and a bar that moves twelve times in an hour
+            tells you nothing. Finished bars stay on screen, so a run ends with
+            one line per category and what it cost. Set it to `False` to keep the
+            run silent, which also avoids importing `tqdm` at all.
 
     Returns:
         The generated cases.
@@ -189,13 +205,70 @@ def generate_corpus(
     cases: list[Case] = []
 
     for category in wanted:
-        for index in range(shape.cases_per_category):
-            case = _generate_case(
-                model, category, shape, rng, asked_on, f"{category.value}-{index:02d}"
-            )
-            if case is not None:
-                cases.append(case)
+        with _progress(
+            category.value, calls_per_category(shape), enabled=progress
+        ) as advance:
+            for index in range(shape.cases_per_category):
+                case = _generate_case(
+                    model,
+                    category,
+                    shape,
+                    rng,
+                    asked_on,
+                    f"{category.value}-{index:02d}",
+                    advance=advance,
+                )
+                if case is not None:
+                    cases.append(case)
     return cases
+
+
+def calls_per_category(shape: CorpusShape) -> int:
+    """Return how many model calls one category of this shape will make.
+
+    One call per session, plus one per case for the question. A failed call is
+    still a call, so this is the exact total rather than an upper bound — which
+    is what lets every bar actually reach the end.
+
+    Args:
+        shape: The corpus shape.
+
+    Returns:
+        The number of model calls.
+    """
+    per_case = shape.evidence_sessions + shape.distractor_sessions + 1
+    return shape.cases_per_category * per_case
+
+
+@contextmanager
+def _progress(
+    label: str, total: int, *, enabled: bool
+) -> Iterator[Callable[[str], None]]:
+    """Yield a callable that advances one category's progress bar.
+
+    One bar per category, left on screen when it finishes, so a run ends with a
+    readable line per category instead of a single bar that hides which half of
+    the corpus was slow.
+
+    The bar goes to stdout while the failure notices go to stderr, so a session
+    that fails mid-run prints cleanly instead of being overwritten by the next
+    redraw. `tqdm` is imported here rather than at module scope: it lives in the
+    `benchmark` dependency group, which CI does not install, and the tests that
+    import this module have to keep working without it.
+    """
+    if not enabled:
+        yield lambda _label: None
+        return
+
+    from tqdm.auto import tqdm
+
+    with tqdm(total=total, unit="call", desc=label, file=sys.stdout) as bar:
+
+        def advance(detail: str) -> None:
+            bar.set_postfix_str(detail, refresh=False)
+            bar.update(1)
+
+        yield advance
 
 
 def write_corpus(cases: list[Case], path: Path) -> Path:
@@ -221,8 +294,14 @@ def _generate_case(
     rng: random.Random,
     asked_on: datetime,
     case_id: str,
+    *,
+    advance: Callable[[str], None],
 ) -> Case | None:
-    """Generate one case, or `None` when the model failed to produce one."""
+    """Generate one case, or `None` when the model failed to produce one.
+
+    `advance` is called once per model call on every path, including the ones
+    that give up, so the bar always reaches its total.
+    """
     client = rng.choice(CLIENTS)
     subject = (
         rng.choice(PROCEDURES)
@@ -243,6 +322,7 @@ def _generate_case(
             else _distractor_material(rng)
         )
         turns = _write_session(model, date, context, payload, rng)
+        advance(f"{case_id} s{index:02d}")
         if turns is None:
             continue
         sessions.append(
@@ -264,9 +344,11 @@ def _generate_case(
 
     evidence = [session for session in sessions if session.is_evidence]
     if not evidence:
+        advance(f"{case_id} abandoned")
         return None
 
     question = _write_question(model, category, evidence, asked_on)
+    advance(f"{case_id} question")
     if question is None:
         return None
 
@@ -404,6 +486,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-url", default=None)
     parser.add_argument("--api-key", default="not-needed")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="suppress the progress bar, for non-interactive runs",
+    )
     return parser
 
 
@@ -429,7 +516,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     shape = CORPUS_SHAPES[args.config]
     print(f"generating {args.config} corpus with {args.model}…")
-    cases = generate_corpus(model, shape, seed=args.seed)
+    cases = generate_corpus(model, shape, seed=args.seed, progress=not args.quiet)
     path = write_corpus(cases, args.out)
     sessions = sum(len(case.sessions) for case in cases)
     print(f"wrote {len(cases)} cases / {sessions} sessions to {path}")
