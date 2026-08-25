@@ -1,6 +1,7 @@
 # deep-memory-agent
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![PyPI version](https://img.shields.io/pypi/v/deep-memory-agent)](https://pypi.org/project/deep-memory-agent/)
 [![Version](https://img.shields.io/github/v/tag/giurlanda/deep-memory-agent?sort=semver&label=version)](https://github.com/giurlanda/deep-memory-agent/tags)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 
