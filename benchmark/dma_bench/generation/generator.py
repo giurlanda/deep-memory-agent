@@ -23,6 +23,17 @@ Run it once and keep the output:
 uv run --group benchmark python -m dma_bench.generation.generator \\
     --config small --out benchmark/data/operational_small.json
 ```
+
+`--config` fixes every dimension of the corpus at once, which is the wrong knob
+when only the size is in question — a five-case smoke run of the `large` shape
+has no configuration of its own. `--cases-per-category` overrides that one
+number and leaves the timeline and the session counts where the configuration
+put them:
+
+```bash
+uv run --group benchmark python -m dma_bench.generation.generator \\
+    --config large --cases-per-category 2 --out benchmark/data/trial.json
+```
 """
 
 from __future__ import annotations
@@ -68,7 +79,9 @@ class CorpusShape(BaseModel):
     """How big a generated corpus is and how far it spreads.
 
     Attributes:
-        cases_per_category: How many cases to generate for each category.
+        cases_per_category: How many cases to generate for each category. This
+            is the one dimension `generate_corpus` will override, through its
+            `cases_per_category` argument.
         evidence_sessions: Sessions that carry the answer.
         distractor_sessions: Sessions about other accounts and projects.
         span_days: How far apart the first and last session sit. This is the
@@ -171,6 +184,7 @@ def generate_corpus(
     shape: CorpusShape,
     *,
     categories: list[BenchCategory] | None = None,
+    cases_per_category: int | None = None,
     seed: int = 0,
     end_date: datetime | None = None,
     progress: bool = True,
@@ -182,6 +196,11 @@ def generate_corpus(
         shape: How many cases, how many sessions, how long a timeline.
         categories: Categories to generate. Defaults to the two that LongMemEval
             cannot supply.
+        cases_per_category: How many cases to generate per category, overriding
+            the count `shape` carries. `None` keeps the configured value.
+            Nothing else moves — sessions per case and the timeline span stay as
+            the configuration set them — so a trial run and a full one differ
+            only in how many cases they pay for.
         seed: Makes the sampling of entities reproducible. The model's own
             output is not deterministic, which is why the corpus is written to
             disk once and reused rather than regenerated per run.
@@ -195,7 +214,11 @@ def generate_corpus(
 
     Returns:
         The generated cases.
+
+    Raises:
+        ValueError: If `cases_per_category` is given and is not positive.
     """
+    shape = _override_cases(shape, cases_per_category)
     wanted = categories or [
         BenchCategory.PROCEDURAL_RETRIEVAL,
         BenchCategory.NON_REPETITION,
@@ -238,6 +261,21 @@ def calls_per_category(shape: CorpusShape) -> int:
     """
     per_case = shape.evidence_sessions + shape.distractor_sessions + 1
     return shape.cases_per_category * per_case
+
+
+def _override_cases(shape: CorpusShape, cases_per_category: int | None) -> CorpusShape:
+    """Return `shape` with its case count replaced, when one was asked for.
+
+    The override is resolved once, at the top of `generate_corpus`, so that the
+    count the cases are generated from and the count the progress bars are
+    sized from can never disagree.
+    """
+    if cases_per_category is None:
+        return shape
+    if cases_per_category < 1:
+        msg = f"cases_per_category must be positive, got {cases_per_category}"
+        raise ValueError(msg)
+    return shape.model_copy(update={"cases_per_category": cases_per_category})
 
 
 @contextmanager
@@ -477,10 +515,25 @@ def _write_question(
         return None
 
 
+def _positive_int(text: str) -> int:
+    """Parse a count from the command line, rejecting zero and negatives."""
+    value = int(text)
+    if value < 1:
+        msg = f"expected a positive integer, got {value}"
+        raise argparse.ArgumentTypeError(msg)
+    return value
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the command-line parser."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", choices=sorted(CORPUS_SHAPES), default="small")
+    parser.add_argument(
+        "--cases-per-category",
+        type=_positive_int,
+        default=None,
+        help="how many cases per category, overriding what --config fixes",
+    )
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--model", default="gpt-4o-mini")
     parser.add_argument("--base-url", default=None)
@@ -515,8 +568,18 @@ def main(argv: list[str] | None = None) -> int:
         max_retries=2,
     )
     shape = CORPUS_SHAPES[args.config]
-    print(f"generating {args.config} corpus with {args.model}…")
-    cases = generate_corpus(model, shape, seed=args.seed, progress=not args.quiet)
+    per_category = args.cases_per_category or shape.cases_per_category
+    print(
+        f"generating {args.config} corpus with {args.model}, "
+        f"{per_category} cases per category…"
+    )
+    cases = generate_corpus(
+        model,
+        shape,
+        cases_per_category=args.cases_per_category,
+        seed=args.seed,
+        progress=not args.quiet,
+    )
     path = write_corpus(cases, args.out)
     sessions = sum(len(case.sessions) for case in cases)
     print(f"wrote {len(cases)} cases / {sessions} sessions to {path}")

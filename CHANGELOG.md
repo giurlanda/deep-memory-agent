@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `--cases-per-category` on the benchmark corpus generator, and the matching
+  `cases_per_category` argument on `generate_corpus`, overriding the case count
+  the chosen `--config` fixes while leaving the sessions per case and the
+  timeline span alone — so a trial corpus can use the `large` timeline without
+  paying for a `large` run.
+
 ## [0.1.3] - 2026-08-25
 
 ### Added

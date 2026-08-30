@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 
+import pytest
 from langchain_core.language_models import BaseChatModel
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import RunnableLambda
@@ -67,6 +68,38 @@ def test_the_large_shape_is_the_expensive_one():
     assert calls_per_category(CORPUS_SHAPES["large"]) > calls_per_category(
         CORPUS_SHAPES["small"]
     )
+
+
+def test_the_case_count_can_be_overridden_without_moving_anything_else():
+    cases = generate_corpus(
+        CountingModel(),
+        SHAPE,
+        categories=[BenchCategory.PROCEDURAL_RETRIEVAL],
+        cases_per_category=3,
+        progress=False,
+    )
+
+    assert len(cases) == 3
+    # Only the count moves: SHAPE's one evidence and one distractor session per
+    # case survive the override.
+    assert all(len(case.sessions) == 2 for case in cases)
+
+
+def test_the_overridden_count_leaves_the_shape_it_was_handed_untouched():
+    generate_corpus(
+        CountingModel(),
+        SHAPE,
+        categories=[BenchCategory.PROCEDURAL_RETRIEVAL],
+        cases_per_category=1,
+        progress=False,
+    )
+
+    assert SHAPE.cases_per_category == 2
+
+
+def test_a_case_count_of_zero_or_less_is_refused():
+    with pytest.raises(ValueError, match="must be positive"):
+        generate_corpus(CountingModel(), SHAPE, cases_per_category=0, progress=False)
 
 
 def test_a_corpus_is_generated_with_the_shape_it_was_asked_for():
@@ -151,6 +184,26 @@ def test_there_is_one_bar_per_category(monkeypatch):
     assert all(entry[3] is True for entry in bars)
 
 
+def test_the_bar_is_sized_from_the_overridden_count(monkeypatch):
+    # The bar counts model calls, so an override that halves the cases has to
+    # halve the total too, or the bar never reaches its end.
+    log = []
+    with recorder(log) as fake:
+        monkeypatch.setattr(generator, "_progress", fake)
+        generate_corpus(
+            CountingModel(),
+            SHAPE,
+            categories=[BenchCategory.NON_REPETITION],
+            cases_per_category=1,
+            progress=True,
+        )
+
+    assert [entry for entry in log if entry[0] == "bar"] == [
+        ("bar", "non-repetition", 3, True)
+    ]
+    assert len([entry for entry in log if entry[0] == "step"]) == 3
+
+
 def test_the_bar_reaches_its_total(monkeypatch):
     log = []
     with recorder(log) as fake:
@@ -221,3 +274,18 @@ def test_the_cli_can_turn_the_bar_off():
 
     assert parser.parse_args(["--out", "x.json"]).quiet is False
     assert parser.parse_args(["--out", "x.json", "--quiet"]).quiet is True
+
+
+def test_the_cli_takes_a_case_count_and_defaults_to_the_configured_one():
+    parser = generator._build_parser()
+
+    assert parser.parse_args(["--out", "x.json"]).cases_per_category is None
+    args = parser.parse_args(["--out", "x.json", "--cases-per-category", "3"])
+    assert args.cases_per_category == 3
+
+
+def test_the_cli_refuses_a_case_count_of_zero_or_less():
+    parser = generator._build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--out", "x.json", "--cases-per-category", "0"])

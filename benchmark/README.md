@@ -104,6 +104,20 @@ uv run --group benchmark python -m dma_bench.generation.generator \
 shard routing, accumulated supersessions and repeated consolidation passes are
 actually exercised — the one thing the published datasets cannot offer.
 
+`--config` fixes every dimension at once, though, and size is usually the one
+you want to move on its own — a two-case trial of the `large` timeline has no
+configuration of its own. `--cases-per-category` overrides just that number and
+leaves the sessions per case and the timeline where the configuration put them,
+so a trial run and the full one differ only in how many cases they pay for:
+
+```bash
+uv run --group benchmark python -m dma_bench.generation.generator \
+    --config large --cases-per-category 2 --out benchmark/data/trial.json
+```
+
+`generate_corpus(..., cases_per_category=2)` is the same override from Python,
+for the notebook.
+
 Generation shows one progress bar per category, counting **model calls** rather
 than cases: `large` is a few dozen cases but over a thousand calls, and a bar
 that moves twelve times in an hour says nothing useful. Finished bars stay on
