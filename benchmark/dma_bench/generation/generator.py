@@ -23,6 +23,31 @@ Run it once and keep the output:
 uv run --group benchmark python -m dma_bench.generation.generator \\
     --config small --out benchmark/data/operational_small.json
 ```
+
+`--config` fixes every dimension of the corpus at once, which is the wrong knob
+when only the size is in question — a five-case smoke run of the `large` shape
+has no configuration of its own. `--cases-per-category` overrides that one
+number and leaves the timeline and the session counts where the configuration
+put them:
+
+```bash
+uv run --group benchmark python -m dma_bench.generation.generator \\
+    --config large --cases-per-category 2 --out benchmark/data/trial.json
+```
+
+Generation is slow and paid for by the call, so no case is ever generated
+twice: each one is written to `--out` as soon as it is finished, and a run
+pointed at a file that already exists resumes it — the cases already there are
+kept, and only what is missing to reach the count is generated. An interrupted
+run is restarted with the same command, and a corpus already on disk is grown
+by asking for more cases:
+
+```bash
+uv run --group benchmark python -m dma_bench.generation.generator \\
+    --config large --cases-per-category 12 --out benchmark/data/trial.json
+```
+
+Delete the file to start over.
 """
 
 from __future__ import annotations
@@ -60,6 +85,7 @@ __all__ = [
     "CorpusShape",
     "calls_per_category",
     "generate_corpus",
+    "load_corpus",
     "write_corpus",
 ]
 
@@ -68,7 +94,9 @@ class CorpusShape(BaseModel):
     """How big a generated corpus is and how far it spreads.
 
     Attributes:
-        cases_per_category: How many cases to generate for each category.
+        cases_per_category: How many cases to generate for each category. This
+            is the one dimension `generate_corpus` will override, through its
+            `cases_per_category` argument.
         evidence_sessions: Sessions that carry the answer.
         distractor_sessions: Sessions about other accounts and projects.
         span_days: How far apart the first and last session sit. This is the
@@ -171,9 +199,11 @@ def generate_corpus(
     shape: CorpusShape,
     *,
     categories: list[BenchCategory] | None = None,
+    cases_per_category: int | None = None,
     seed: int = 0,
     end_date: datetime | None = None,
     progress: bool = True,
+    out: Path | None = None,
 ) -> list[Case]:
     """Generate a corpus of operational cases.
 
@@ -182,9 +212,18 @@ def generate_corpus(
         shape: How many cases, how many sessions, how long a timeline.
         categories: Categories to generate. Defaults to the two that LongMemEval
             cannot supply.
-        seed: Makes the sampling of entities reproducible. The model's own
-            output is not deterministic, which is why the corpus is written to
-            disk once and reused rather than regenerated per run.
+        cases_per_category: How many cases to generate per category, overriding
+            the count `shape` carries. `None` keeps the configured value.
+            Nothing else moves — sessions per case and the timeline span stay as
+            the configuration set them — so a trial run and a full one differ
+            only in how many cases they pay for.
+        seed: Makes the sampling of entities reproducible. Each case draws
+            from its own stream, keyed by the seed together with the category
+            and the index of the case, so a case gets the same client and the
+            same procedure whether it was generated in one run or in a resumed
+            one. The model's own output is not deterministic, which is why the
+            corpus is written to disk once and reused rather than regenerated
+            per run.
         end_date: The day the questions are asked. Defaults to today.
         progress: Show one `tqdm` bar per category. Each counts **model
             calls**, not cases: a `large` corpus is a few dozen cases but well
@@ -192,38 +231,59 @@ def generate_corpus(
             tells you nothing. Finished bars stay on screen, so a run ends with
             one line per category and what it cost. Set it to `False` to keep the
             run silent, which also avoids importing `tqdm` at all.
+        out: Where to keep the corpus as it is generated. Every finished case
+            is written out immediately, so a run that dies — or is killed
+            because it was going to cost too much — leaves everything it had
+            paid for behind. A file that already exists is resumed rather than
+            overwritten: its cases are kept, counted per category, and only the
+            ones missing to reach `cases_per_category` are generated, which is
+            also how a corpus is grown after the fact. `None` keeps everything
+            in memory and writes nothing.
 
     Returns:
-        The generated cases.
+        The corpus: the cases read back from `out`, if any, followed by the
+        ones this run generated.
+
+    Raises:
+        ValueError: If `cases_per_category` is given and is not positive, or if
+            `out` exists and is not a corpus.
     """
+    shape = _override_cases(shape, cases_per_category)
     wanted = categories or [
         BenchCategory.PROCEDURAL_RETRIEVAL,
         BenchCategory.NON_REPETITION,
     ]
-    rng = random.Random(seed)
     asked_on = end_date or datetime.now(tz=UTC)
-    cases: list[Case] = []
+    cases = load_corpus(out) if out is not None and out.exists() else []
 
     for category in wanted:
+        done = sum(1 for case in cases if case.category == category)
+        missing = shape.cases_per_category - done
+        if missing < 1:
+            continue
+        first = _next_index(cases, category)
         with _progress(
-            category.value, calls_per_category(shape), enabled=progress
+            category.value, calls_per_category(shape, cases=missing), enabled=progress
         ) as advance:
-            for index in range(shape.cases_per_category):
+            for index in range(first, first + missing):
                 case = _generate_case(
                     model,
                     category,
                     shape,
-                    rng,
+                    random.Random(f"{seed}:{category.value}:{index}"),
                     asked_on,
                     f"{category.value}-{index:02d}",
                     advance=advance,
                 )
-                if case is not None:
-                    cases.append(case)
+                if case is None:
+                    continue
+                cases.append(case)
+                if out is not None:
+                    write_corpus(cases, out)
     return cases
 
 
-def calls_per_category(shape: CorpusShape) -> int:
+def calls_per_category(shape: CorpusShape, *, cases: int | None = None) -> int:
     """Return how many model calls one category of this shape will make.
 
     One call per session, plus one per case for the question. A failed call is
@@ -232,12 +292,30 @@ def calls_per_category(shape: CorpusShape) -> int:
 
     Args:
         shape: The corpus shape.
+        cases: How many cases the count is for. Defaults to a full category;
+            a resumed run passes the number it still has to generate, so the
+            bar is sized for the work left rather than for the whole corpus.
 
     Returns:
         The number of model calls.
     """
     per_case = shape.evidence_sessions + shape.distractor_sessions + 1
-    return shape.cases_per_category * per_case
+    return (shape.cases_per_category if cases is None else cases) * per_case
+
+
+def _override_cases(shape: CorpusShape, cases_per_category: int | None) -> CorpusShape:
+    """Return `shape` with its case count replaced, when one was asked for.
+
+    The override is resolved once, at the top of `generate_corpus`, so that the
+    count the cases are generated from and the count the progress bars are
+    sized from can never disagree.
+    """
+    if cases_per_category is None:
+        return shape
+    if cases_per_category < 1:
+        msg = f"cases_per_category must be positive, got {cases_per_category}"
+        raise ValueError(msg)
+    return shape.model_copy(update={"cases_per_category": cases_per_category})
 
 
 @contextmanager
@@ -274,6 +352,11 @@ def _progress(
 def write_corpus(cases: list[Case], path: Path) -> Path:
     """Write a corpus to disk.
 
+    The file is written beside itself and renamed into place, because this is
+    called after every case during a long run: a process killed mid-write must
+    leave the corpus it already had, not half a JSON document that the next run
+    would refuse to resume.
+
     Args:
         cases: The generated cases.
         path: Destination file.
@@ -283,8 +366,53 @@ def write_corpus(cases: list[Case], path: Path) -> Path:
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = [case.model_dump(mode="json") for case in cases]
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+    tmp = path.with_name(f"{path.name}.tmp")
+    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+    tmp.replace(path)
     return path
+
+
+def load_corpus(path: Path) -> list[Case]:
+    """Read a corpus back from disk.
+
+    A corpus that cannot be read raises rather than being treated as empty:
+    the alternative is a run that quietly overwrites hours of generation.
+
+    Args:
+        path: The corpus JSON.
+
+    Returns:
+        The cases it holds.
+
+    Raises:
+        ValueError: If the file is not a list of cases.
+    """
+    records = json.loads(path.read_text())
+    if not isinstance(records, list):
+        # TRY004 asks for a TypeError here, but nobody passed a bad argument —
+        # the file on disk is malformed, which is a ValueError like any other
+        # corpus that fails to validate below.
+        msg = f"{path} is not a corpus: expected a list of cases"
+        raise ValueError(msg)  # noqa: TRY004
+    return [Case.model_validate(record) for record in records]
+
+
+def _next_index(cases: list[Case], category: BenchCategory) -> int:
+    """Return the first case index of `category` that is free to use.
+
+    Numbering continues from the highest id in the corpus rather than from how
+    many cases are in it: a case abandoned by a failed model call is never
+    written, so the ids on disk have holes in them, and counting would hand a
+    resumed run an id one of the surviving cases already took.
+    """
+    prefix = f"{category.value}-"
+    used = [
+        int(suffix)
+        for case in cases
+        if case.question_id.startswith(prefix)
+        and (suffix := case.question_id[len(prefix) :]).isdigit()
+    ]
+    return max(used) + 1 if used else 0
 
 
 def _generate_case(
@@ -477,11 +605,31 @@ def _write_question(
         return None
 
 
+def _positive_int(text: str) -> int:
+    """Parse a count from the command line, rejecting zero and negatives."""
+    value = int(text)
+    if value < 1:
+        msg = f"expected a positive integer, got {value}"
+        raise argparse.ArgumentTypeError(msg)
+    return value
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the command-line parser."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", choices=sorted(CORPUS_SHAPES), default="small")
-    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument(
+        "--cases-per-category",
+        type=_positive_int,
+        default=None,
+        help="how many cases per category, overriding what --config fixes",
+    )
+    parser.add_argument(
+        "--out",
+        type=Path,
+        required=True,
+        help="where to keep the corpus; an existing file is resumed, not overwritten",
+    )
     parser.add_argument("--model", default="gpt-4o-mini")
     parser.add_argument("--base-url", default=None)
     parser.add_argument("--api-key", default="not-needed")
@@ -515,8 +663,21 @@ def main(argv: list[str] | None = None) -> int:
         max_retries=2,
     )
     shape = CORPUS_SHAPES[args.config]
-    print(f"generating {args.config} corpus with {args.model}…")
-    cases = generate_corpus(model, shape, seed=args.seed, progress=not args.quiet)
+    per_category = args.cases_per_category or shape.cases_per_category
+    if args.out.exists():
+        print(f"resuming {args.out}: {len(load_corpus(args.out))} cases already there")
+    print(
+        f"generating {args.config} corpus with {args.model}, "
+        f"{per_category} cases per category…"
+    )
+    cases = generate_corpus(
+        model,
+        shape,
+        cases_per_category=args.cases_per_category,
+        seed=args.seed,
+        progress=not args.quiet,
+        out=args.out,
+    )
     path = write_corpus(cases, args.out)
     sessions = sum(len(case.sessions) for case in cases)
     print(f"wrote {len(cases)} cases / {sessions} sessions to {path}")
