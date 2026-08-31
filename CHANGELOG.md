@@ -33,6 +33,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `for_deep_agent` on `resolve_backend`, so a standalone caller can resolve a
   `memory_dir` without landing on a `StateBackend` that only answers inside a
   graph execution.
+- Two runnable examples for the semantic index, `examples/build_semantic_memory.py`
+  and `examples/semantic_memory.py`, against a hybrid Qdrant collection (dense +
+  BM25) with embeddings served locally over an OpenAI-compatible endpoint. The
+  second runs one question through `memory_search` and `semantic_search` side by
+  side with no model in the loop, so the gap between them is visible rather than
+  asserted.
+- An `examples` dependency group holding what those scripts need. Like
+  `benchmark`, it is outside `uv sync --all-extras`, so CI and the published
+  wheel are unaffected.
 
 ### Changed
 

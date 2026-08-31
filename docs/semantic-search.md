@@ -169,6 +169,26 @@ A scoped ingest never prunes what it did not look at: running
 `semantic_ingest(category="procedure")` leaves the manifest rows of `facts`
 exactly where they are.
 
+## Runnable examples
+
+Two scripts under [`examples/`](https://github.com/giurlanda/deep-memory-agent/tree/main/examples)
+show the whole thing against a real store — a hybrid Qdrant collection (dense +
+BM25) and an embedding model served locally over an OpenAI-compatible endpoint,
+so indexing costs nothing and never leaves the machine:
+
+- `build_semantic_memory.py` — the manager records a few things in a user's own
+  words, the tree is indexed, and a read-only agent answers questions that share
+  almost no vocabulary with what was stored.
+- `semantic_memory.py` — indexes an existing tree from plain code, then runs one
+  question through `memory_search` and `semantic_search` side by side, with no
+  model in the loop, so the gap between them is visible rather than asserted.
+
+```bash
+docker run -p 6333:6333 qdrant/qdrant
+uv sync --extra semantic --group examples
+uv run python examples/build_semantic_memory.py
+```
+
 ## Cost note
 
 A change to metadata alone re-embeds the whole entry: when an entry is retired,

@@ -63,6 +63,19 @@ benchmark = [
     "pandas>=2.2",
     "tqdm>=4.66",
 ]
+# What the semantic examples under `examples/` need: an OpenAI-compatible
+# embedding client and one concrete hybrid vector store, so the scripts run as
+# written. The library itself pins no store — which one to use is the caller's
+# decision. Kept out of the `semantic` extra for the same reason `benchmark` is
+# kept out of `dev`: CI runs `uv sync --all-extras`, and `fastembed` drags in
+# onnxruntime. Install with `uv sync --group examples`.
+examples = [
+    "fastembed>=0.4,<1.0",
+    "langchain-openai>=0.3",
+    # Floored at 1.0, the first release built against `langchain-core` 1.x.
+    "langchain-qdrant>=1.0,<2.0",
+    "qdrant-client>=1.12,<2.0",
+]
 
 [build-system]
 requires = ["hatchling"]
