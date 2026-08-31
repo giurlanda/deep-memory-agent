@@ -100,7 +100,7 @@ ignore = [
     "S311",     # sampling is about reproducibility, not cryptography
     "T201",     # the runner reports progress on stdout
 ]
-"*.ipynb" = ["D", "ANN", "E402", "ERA001", "INP001", "PLR2004", "S311", "T201"]
+"*.ipynb" = ["A004", "D", "ANN", "E402", "ERA001", "INP001", "PLR2004", "S311", "T201"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
