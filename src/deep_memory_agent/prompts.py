@@ -11,6 +11,8 @@ __all__ = [
     "MANAGER_AGENT_PROMPT",
     "MEMORY_STRUCTURE_PROMPT",
     "SEARCH_AGENT_PROMPT",
+    "SEMANTIC_MANAGER_BLOCK",
+    "SEMANTIC_READER_BLOCK",
 ]
 
 MEMORY_STRUCTURE_PROMPT = """\
@@ -63,7 +65,8 @@ available to you and the backend will refuse write operations under `/memory/`.
 # How to answer
 
 1. Start from `memory_index` to see what exists, then narrow with
-   `memory_search`. Reach for `memory_read` when you need a whole file.
+   `memory_search`. Reach for `memory_get` when a search points at one entry
+   and you need it in full, and for `memory_read` when you need a whole file.
 2. Prefer active entries. Only mention a superseded one when the history is
    what was asked about, and say explicitly that it was replaced.
 3. Quote the entry `id` and the file path behind every claim, so the answer can
@@ -105,4 +108,52 @@ episodes into durable knowledge.
    `memory_consolidate` reads recent episodes and promotes stable patterns to
    facts, rules or procedures. Episodes stay where they are: consolidation adds
    durable knowledge, it never deletes history.
+"""
+
+SEMANTIC_MANAGER_BLOCK = """
+# The semantic index
+
+Memory also carries a semantic index, and you have two tools over it:
+`semantic_ingest` writes entries into it, `semantic_search` queries it by
+meaning rather than by wording.
+
+Keep it current: call `semantic_ingest` after `memory_write`, `memory_update`
+or `memory_consolidate`. Unchanged entries are skipped and re-indexing an entry
+updates it, so calling it again is cheap and never duplicates anything. Nothing
+calls it for you — unlike the router indexes, which `memory_write` updates on
+its own, the semantic index only moves when you move it, and every write you do
+not follow with an ingest is a write `semantic_search` cannot see.
+
+Use `semantic_search` before writing, as the second half of the duplicate check:
+`memory_search` catches an entry that shares your wording, this catches one that
+says the same thing in different words. Finding one is the signal to
+`memory_update` it rather than append a near-duplicate.
+"""
+"""Appended to the manager prompt when the semantic tools are attached.
+
+It is explicit about the ingest being manual, because that is the one thing the
+manager can get wrong that no code path corrects for it.
+"""
+
+SEMANTIC_READER_BLOCK = """
+# Semantic search
+
+Memory carries a semantic index, and you have a `semantic_search` tool over it.
+It adds an entry point to the protocol above, it does not replace it.
+
+- Use it when `memory_search` comes up empty, or when the question is phrased
+  differently from how the entry answering it was probably written — that is
+  exactly the case a substring search cannot cover.
+- What comes back are excerpts. Open the entry behind a hit with `memory_get`,
+  or its file with `memory_read`, before you rely on it.
+- The index can lag behind the most recent writes: it is refreshed explicitly,
+  not on every write. For the freshest state of memory, `memory_search` and
+  `memory_read` are the authority — the files are, the index is derived.
+- A semantic search that finds nothing is not a "memory does not hold this".
+  Fall back on `memory_index` and `memory_search` before concluding that.
+"""
+"""Appended to the recall prompt when the search tool is attached.
+
+It carries no ingestion instructions on purpose: the recall agent is never given
+the ingest tool, and a prompt suggesting otherwise would only invite it to try.
 """

@@ -95,6 +95,8 @@ def build_memory_backend(
 def resolve_backend(
     memory_dir: str | Path | None = None,
     backend: BackendProtocol | None = None,
+    *,
+    for_deep_agent: bool = True,
 ) -> BackendProtocol:
     """Resolve the backend an agent factory should use.
 
@@ -106,6 +108,11 @@ def resolve_backend(
     Args:
         memory_dir: Host directory to build the default backend from.
         backend: A ready-made backend serving the `/memory/` tree.
+        for_deep_agent: Forwarded to `build_memory_backend` when `memory_dir` is
+            given. Leave it `True` for an agent factory; set it to `False` for a
+            standalone caller such as `ingest_semantic_index`, which runs
+            outside a LangGraph execution and would otherwise hit a
+            `StateBackend` that cannot answer.
 
     Returns:
         The backend to hand to the agent.
@@ -121,4 +128,4 @@ def resolve_backend(
         raise ValueError(msg)
     if backend is not None:
         return backend
-    return build_memory_backend(memory_dir)  # type: ignore[arg-type]
+    return build_memory_backend(memory_dir, for_deep_agent=for_deep_agent)  # type: ignore[arg-type]

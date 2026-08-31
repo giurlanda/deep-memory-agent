@@ -5,6 +5,45 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-09-01
+
+### Added
+
+- Semantic search over the memory tree: an embedding index alongside the lexical
+  one, covering all seven categories. The markdown files stay the single source
+  of truth — the index is derived data, rebuildable from `/memory/` at any time
+  and deletable without losing a fact. Enabled by passing `embeddings` and
+  `vector_store` to either agent factory; needs the new optional `semantic`
+  extra. ([#10])
+- `semantic_ingest` and `semantic_search` tools. The manager agent gets both,
+  since it is the single writer and so the only agent that can keep a derived
+  index in step; the recall agent gets only the search, because withholding the
+  ingest tool is the only way to keep it read-only over a store that
+  `READ_ONLY_MEMORY_PERMISSIONS` cannot guard.
+- `ingest_semantic_index`, the same ingest without a model in the loop, for a
+  cron entry, a pre-commit hook or a deployment step. Re-running it with nothing
+  changed leaves the vector store as it was and says so.
+- `SemanticIndex`, `SemanticConfig`, `ChunkingConfig`, `IngestReport`,
+  `SemanticTools`, `chunk_entry` and `create_semantic_tools` on the public API,
+  plus a `Semantic search` page in the docs.
+- `memory_get`, a recall tool that returns one entry in full given its id.
+  `memory_search` truncates long bodies and `memory_read` hands back every entry
+  in a file, so there was no way to open exactly the entry a hit pointed at —
+  a gap the semantic index makes routine.
+- `for_deep_agent` on `resolve_backend`, so a standalone caller can resolve a
+  `memory_dir` without landing on a `StateBackend` that only answers inside a
+  graph execution.
+
+### Changed
+
+- `create_memory_search_agent` and `create_memory_manager_agent` take
+  `embeddings`, `vector_store`, `search_k` and `semantic_config`. All default to
+  off; without them the agents behave exactly as before. When semantic search is
+  active, the built-in prompts gain a section on it — a `system_prompt` of your
+  own still replaces the prompt whole, that section included.
+
+[#10]: https://github.com/giurlanda/deep-memory-agent/issues/10
+
 ## [0.1.4] - 2026-08-31
 
 ### Added

@@ -22,6 +22,9 @@ unchanged against a directory on disk, ephemeral thread state, or a remote store
 
 ```bash
 pip install deep-memory-agent
+
+# with semantic (embedding) search over memory:
+pip install "deep-memory-agent[semantic]"
 ```
 
 ## Quickstart
@@ -124,6 +127,50 @@ supersedes what it contradicts.
 See [examples/](examples/) for runnable scripts, or the
 [docs](https://giurlanda.github.io/deep-memory-agent/).
 
+## Semantic search
+
+`memory_search` is a substring test, so it misses any question phrased
+differently from the entry that answers it — a rule stored as *"always apply the
+Enterprise discount to customers with more than 3 years of contract"* is
+invisible to *"what discounts exist for long-standing customers?"*. Hand either
+factory an embedding model and a vector store and the agents gain an index that
+matches meaning instead of wording:
+
+```python
+from langchain_core.vectorstores import InMemoryVectorStore
+from langchain_openai import OpenAIEmbeddings
+
+from deep_memory_agent import create_memory_manager_agent
+
+embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+
+manager = create_memory_manager_agent(
+    "claude-sonnet-5",
+    memory_dir="./memory",
+    embeddings=embeddings,
+    vector_store=InMemoryVectorStore(embeddings),
+)
+```
+
+The manager gets `semantic_ingest` and `semantic_search`; the recall agent gets
+only the search, since withholding the ingest tool is the only way to keep it
+read-only over a store the filesystem permissions cannot guard. Refresh the index
+from ordinary code with `ingest_semantic_index`:
+
+```python
+from deep_memory_agent import ingest_semantic_index
+
+report = ingest_semantic_index(embeddings, vector_store, memory_dir="./memory")
+print(report.summary())
+```
+
+The index is **derived data**: the markdown files stay the source of truth, and
+dropping the index costs the ability to search by meaning until the next ingest,
+never a fact. No vector store is pinned — bring your own; the only requirement is
+that it upserts on a repeated id. See
+[Semantic search](https://giurlanda.github.io/deep-memory-agent/semantic-search/)
+for chunking, filters, the manifest and the cost of the explicit-ingest choice.
+
 ## Benchmark
 
 [`benchmark/`](benchmark/) holds a LongMemEval-style benchmark for the two
@@ -139,11 +186,16 @@ uv run --group benchmark jupyter lab benchmark/run_benchmark.ipynb
 
 ## Scope of this version
 
-Memory is file-based and retrieval is lexical (case-insensitive substring over
-summary, body and tags). The structured frontmatter is what makes a stronger
-index — BM25, embeddings — addable later without changing the files themselves.
-Automatic decay, locking between concurrent writers and vector retrieval are out
-of scope; keeping a single writer over the tree is the manager agent's job.
+Memory is file-based, and the files are always the source of truth. Retrieval
+comes in two flavours: lexical by default (case-insensitive substring over
+summary, body and tags), and semantic when an embedding model and a vector store
+are supplied — the latter an index derived from the files, never a second copy of
+them. BM25 is still addable the same way, without changing the format.
+
+Out of scope: automatic decay, and locking between concurrent writers — keeping a
+single writer over the tree is the manager agent's job. The semantic index is
+also refreshed explicitly rather than on every write, so it can trail the files
+between ingests.
 
 ## Development
 
