@@ -42,7 +42,8 @@ def build_recall_tools(store: MemoryStore) -> list[BaseTool]:
         store: Store bound to the backend serving `/memory/`.
 
     Returns:
-        The `memory_index`, `memory_search` and `memory_read` tools.
+        The `memory_index`, `memory_search`, `memory_get` and `memory_read`
+        tools.
     """
 
     @tool
@@ -59,20 +60,7 @@ def build_recall_tools(store: MemoryStore) -> list[BaseTool]:
         Returns:
             The router index as a markdown table.
         """
-        try:
-            target = index_path(MemoryKind(kind)) if kind else index_path()
-        except ValueError:
-            return f"Error: unknown memory kind {kind!r}."
-        rows = read_index_rows(store.backend, target)
-        if not rows:
-            return f"{target} lists no files yet."
-        lines = [f"{target}:"]
-        lines += [
-            f"- {row.path} — {row.description or 'no description'} "
-            f"[tags: {', '.join(row.tags) or '-'}] [updated: {row.updated or '-'}]"
-            for row in sorted(rows.values(), key=lambda item: item.path)
-        ]
-        return "\n".join(lines)
+        return _render_index(store, kind)
 
     @tool
     def memory_search(
@@ -120,6 +108,27 @@ def build_recall_tools(store: MemoryStore) -> list[BaseTool]:
         return "\n\n".join(_format_hit(hit) for hit in hits)
 
     @tool
+    def memory_get(entry_id: str) -> str:
+        """Read one memory entry in full, by its id.
+
+        Use this when a search — lexical or semantic — has pointed at an entry
+        and you need all of it: `memory_search` truncates long bodies, and
+        `memory_read` would hand you every other entry in the same file.
+
+        Args:
+            entry_id: Id of the entry, as printed by the search tools, e.g.
+                `mem_2026-08-24_9f3a1c`.
+
+        Returns:
+            The entry with its file, frontmatter and full body, or an error
+            message if no entry carries that id.
+        """
+        hit = store.get(entry_id)
+        if hit is None:
+            return f"Error: no memory entry with id {entry_id!r}."
+        return _format_hit(hit, limit=None)
+
+    @tool
     def memory_read(path: str, offset: int = 0, limit: int = 400) -> str:
         """Read a memory file in full.
 
@@ -139,7 +148,7 @@ def build_recall_tools(store: MemoryStore) -> list[BaseTool]:
         except ValueError as exc:
             return f"Error: {exc}"
 
-    return [memory_index, memory_search, memory_read]
+    return [memory_index, memory_search, memory_get, memory_read]
 
 
 def build_write_tools(
@@ -290,11 +299,49 @@ def build_write_tools(
     return tools
 
 
-def _format_hit(hit: MemoryHit) -> str:
-    """Render one search hit for the model."""
+def _render_index(store: MemoryStore, kind: str | None) -> str:
+    """Render one router index for the model.
+
+    Args:
+        store: Store bound to the backend serving `/memory/`.
+        kind: Memory kind whose index is wanted, or `None` for the root index.
+
+    Returns:
+        One line per file, or an error message for an unknown kind.
+    """
+    try:
+        target = index_path(MemoryKind(kind)) if kind else index_path()
+    except ValueError:
+        return f"Error: unknown memory kind {kind!r}."
+    rows = read_index_rows(store.backend, target)
+    if not rows:
+        return f"{target} lists no files yet."
+    lines = [f"{target}:"]
+    lines += [
+        f"- {row.path} — {row.description or 'no description'} "
+        f"[tags: {', '.join(row.tags) or '-'}] [updated: {row.updated or '-'}]"
+        for row in sorted(rows.values(), key=lambda item: item.path)
+    ]
+    return "\n".join(lines)
+
+
+def _format_hit(hit: MemoryHit, *, limit: int | None = _EXCERPT_CHARS) -> str:
+    """Render one entry for the model.
+
+    Args:
+        hit: The entry and the file it lives in.
+        limit: Longest body excerpt, or `None` to render the body in full —
+            which is what `memory_get` asks for, since being able to read a
+            whole entry is its entire reason for existing.
+
+    Returns:
+        A header line with the frontmatter, then the summary and the body.
+    """
     entry = hit.entry
     body = entry.body.strip()
-    excerpt = body[:_EXCERPT_CHARS] + ("…" if len(body) > _EXCERPT_CHARS else "")
+    excerpt = (
+        body if limit is None else body[:limit] + ("…" if len(body) > limit else "")
+    )
     header = (
         f"[{entry.entry_id}] {hit.path} | {entry.category.value} | "
         f"{entry.created:%Y-%m-%d} | confidence: {entry.confidence.value} | "

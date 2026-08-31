@@ -33,6 +33,14 @@ docs = [
     "mkdocs-material>=9.5",
     "mkdocstrings[python]>=0.26",
 ]
+# Opt-in stack for `create_semantic_tools`, `ingest_semantic_index` and the
+# factories' `embeddings` / `vector_store` parameters. Only the text splitter is
+# pinned: `Embeddings`, `VectorStore` and `Document` already come with
+# `langchain-core`, and which embedding provider and which store to use is the
+# caller's decision — the memory tree stays a directory of markdown either way.
+semantic = [
+    "langchain-text-splitters>=1.0,<2.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/giurlanda/deep-memory-agent"
@@ -54,6 +62,19 @@ benchmark = [
     "matplotlib>=3.9",
     "pandas>=2.2",
     "tqdm>=4.66",
+]
+# What the semantic examples under `examples/` need: an OpenAI-compatible
+# embedding client and one concrete hybrid vector store, so the scripts run as
+# written. The library itself pins no store — which one to use is the caller's
+# decision. Kept out of the `semantic` extra for the same reason `benchmark` is
+# kept out of `dev`: CI runs `uv sync --all-extras`, and `fastembed` drags in
+# onnxruntime. Install with `uv sync --group examples`.
+examples = [
+    "fastembed>=0.4,<1.0",
+    "langchain-openai>=0.3",
+    # Floored at 1.0, the first release built against `langchain-core` 1.x.
+    "langchain-qdrant>=1.0,<2.0",
+    "qdrant-client>=1.12,<2.0",
 ]
 
 [build-system]
@@ -112,6 +133,6 @@ runtime-evaluated-base-classes = ["pydantic.BaseModel"]
 
 [tool.ruff.lint.pylint]
 # The public surface is built out of keyword-only factory arguments; five is too
-# tight a budget for a factory that has to accept model, backend, prompt and
-# tool-shaping options at once.
-max-args = 9
+# tight a budget for a factory that has to accept model, backend, prompt,
+# tool-shaping and semantic-index options at once.
+max-args = 11
