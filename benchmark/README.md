@@ -118,11 +118,52 @@ uv run --group benchmark python -m dma_bench.generation.generator \
 `generate_corpus(..., cases_per_category=2)` is the same override from Python,
 for the notebook.
 
+### Resuming, and growing a corpus
+
+A `large` run is a thousand-odd model calls and takes hours, so nothing is
+generated twice. Each case is written to `--out` the moment it is finished, and
+a run pointed at a file that already exists resumes it instead of overwriting
+it: the cases already there are counted per category, and only the ones missing
+to reach the requested count are generated.
+
+So an interrupted run — a dropped connection, a killed process, a laptop that
+slept — is picked up with the same command that started it:
+
+```bash
+uv run --group benchmark python -m dma_bench.generation.generator \
+    --config large --out benchmark/data/operational_large.json
+# resuming benchmark/data/operational_large.json: 7 cases already there
+```
+
+and the same mechanism grows a corpus after the fact. Try two cases, look at
+them, and if they read well ask for the rest — the first two are kept and only
+the difference is paid for:
+
+```bash
+uv run --group benchmark python -m dma_bench.generation.generator \
+    --config large --cases-per-category 2 --out benchmark/data/trial.json
+uv run --group benchmark python -m dma_bench.generation.generator \
+    --config large --cases-per-category 12 --out benchmark/data/trial.json
+```
+
+New cases keep numbering where the file left off, so ids stay stable across
+runs and a case already generated always keeps the id it was written with.
+Entity sampling is keyed by the case index rather than by the order of
+generation, so a corpus grown in two steps draws the same clients and
+procedures as one generated in a single run. `generate_corpus(..., out=path)`
+is the same behaviour from Python.
+
+A corpus that cannot be parsed is refused rather than overwritten, so a
+run pointed at the wrong file fails instead of destroying it. To start over,
+delete the file.
+
 Generation shows one progress bar per category, counting **model calls** rather
 than cases: `large` is a few dozen cases but over a thousand calls, and a bar
 that moves twelve times in an hour says nothing useful. Finished bars stay on
-screen, so a run ends with one line per category and what it cost. Pass
-`--quiet` for non-interactive runs.
+screen, so a run ends with one line per category and what it cost. On a
+resumed run the bars are sized for the cases still missing, and a category that
+is already complete gets no bar at all. Pass `--quiet` for non-interactive
+runs.
 
 ## Running
 
