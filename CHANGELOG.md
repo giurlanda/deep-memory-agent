@@ -42,9 +42,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An `examples` dependency group holding what those scripts need. Like
   `benchmark`, it is outside `uv sync --all-extras`, so CI and the published
   wheel are unaffected.
+- A semantic arm in the benchmark, behind `SEMANTIC_SEARCH_ENABLE`. The memory
+  tree is indexed once after the last session and before the question, and every
+  question is then asked twice over that one tree — once through the shipped
+  search agent, once through the same agent holding `semantic_search`. Both arms
+  share the ingestion, the tree and the stage-one verdict, so what separates
+  their numbers is the index. The second arm lands under `semantic` in each
+  `result.json` and under `summary["semantic"]` in the aggregate, in the same
+  shape as the summary beside it, so it goes through the same tables, the same
+  three-stage decomposition and the same charts.
+- `dma_bench.report.comparison_table` and `dma_bench.metrics.semantic_view`, plus
+  a section in the notebook putting the two arms side by side.
 
 ### Changed
 
+- The benchmark's resume now protects ingestion rather than whole cases. A case
+  whose history has already been replayed keeps its memory tree, its snapshot and
+  its stage-one verdict, and pays only for the answering arms it is missing — so
+  turning `SEMANTIC_SEARCH_ENABLE` on over a finished experiment costs one index
+  and one question per case instead of the whole replay. A case that ended in an
+  error is looked at again on the next run; a replay cut short halfway is redone
+  from the start.
 - `create_memory_search_agent` and `create_memory_manager_agent` take
   `embeddings`, `vector_store`, `search_k` and `semantic_config`. All default to
   off; without them the agents behave exactly as before. When semantic search is

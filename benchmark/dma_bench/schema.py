@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from dma_bench.categories import BenchCategory
 
 __all__ = [
+    "AnswerArm",
     "AnswerRecord",
     "Case",
     "CaseResult",
@@ -31,6 +32,8 @@ __all__ = [
     "QaVerdict",
     "RetrievalVerdict",
     "RunConfig",
+    "SemanticArm",
+    "SemanticIndexRecord",
     "Session",
     "StageVerdict",
     "TraceMessage",
@@ -162,7 +165,16 @@ class RunConfig(BaseModel):
             memory trees, separate agents, a context-local write clock.
         recursion_limit: Cap on agent steps per invocation.
         seed: Makes the per-category sample reproducible.
-        resume: Skip cases that already have a `result.json`.
+        resume: Reuse what a case already has on disk instead of paying for it
+            again. Ingestion is what it protects: a case whose history has been
+            replayed keeps its memory tree, and only the answering arms it is
+            still missing are run.
+        semantic_search: Whether to run the question a second time through an
+            agent that also has `semantic_search`. The lexical arm runs either
+            way — the point of the second arm is the comparison, and a run with
+            only the semantic number in it says nothing.
+        semantic_search_k: Entries a semantic search returns by default.
+        embedding_model: Identifier of the embedding model, for the record.
         started_at: When the run began.
     """
 
@@ -180,6 +192,9 @@ class RunConfig(BaseModel):
     recursion_limit: int = 60
     seed: int = 0
     resume: bool = True
+    semantic_search: bool = False
+    semantic_search_k: int = 5
+    embedding_model: str = ""
     started_at: datetime | None = None
 
 
@@ -323,6 +338,86 @@ class AnswerRecord(BaseModel):
     duration_s: float = 0.0
     error: str | None = None
 
+    @property
+    def attempted(self) -> bool:
+        """Whether this record is the outcome of a real answering attempt.
+
+        A record straight out of `default_factory` is empty and has no error,
+        which is indistinguishable from a run that produced nothing — except
+        that a run always leaves a trace behind, or an error, or both. That is
+        what a resumed case checks to decide whether the arm still owes work,
+        and it reads results written before this field existed.
+        """
+        return bool(self.error or self.trace or self.answer)
+
+
+class AnswerArm(BaseModel):
+    """One pass at the question, with the verdicts over it.
+
+    An arm is a way of reading memory, not a different memory: both arms answer
+    the same case out of the same tree, built once. Only the tools the answering
+    agent holds differ, which is what makes the two numbers comparable.
+
+    Attributes:
+        answer: The reply and its trace.
+        retrieval: Did the search surface the answer-bearing turns?
+        qa: Is the final answer correct?
+        supersede_integrity: The stricter second reading, on knowledge-update
+            cases only.
+    """
+
+    answer: AnswerRecord = Field(default_factory=AnswerRecord)
+    retrieval: RetrievalVerdict = Field(default_factory=RetrievalVerdict)
+    qa: QaVerdict = Field(default_factory=QaVerdict)
+    supersede_integrity: QaVerdict | None = None
+
+
+class SemanticIndexRecord(BaseModel):
+    """One pass of the embedding index over a case's memory tree.
+
+    Built once per case, after the last session has been ingested and before the
+    question is asked. Indexing as memory is written would measure something
+    else: an index that trails the files by a session is the shipped behaviour,
+    but it would make retrieval depend on when the last write landed rather than
+    on what the tree holds.
+
+    Mirrors `deep_memory_agent.IngestReport`, so what the index cost and what it
+    covered survive into `result.json` alongside everything else.
+
+    Attributes:
+        added: Entries the index had never seen.
+        updated: Entries whose content or frontmatter changed.
+        deleted: Entries that were indexed and are no longer in the tree.
+        unchanged: Entries skipped because nothing about them moved.
+        chunks: Chunks written to the vector store.
+        deleted_chunks: Chunks removed from it.
+        entry_errors: Per-entry failures the ingest survived.
+        duration_s: Wall-clock seconds.
+        error: Set when indexing failed outright, in which case the semantic arm
+            is not run: scoring a search agent against an empty index would
+            measure the harness, not the agent.
+    """
+
+    added: int = 0
+    updated: int = 0
+    deleted: int = 0
+    unchanged: int = 0
+    chunks: int = 0
+    deleted_chunks: int = 0
+    entry_errors: list[str] = Field(default_factory=list)
+    duration_s: float = 0.0
+    error: str | None = None
+
+
+class SemanticArm(AnswerArm):
+    """The answering arm that also holds `semantic_search`.
+
+    Attributes:
+        index: What building the embedding index cost and covered.
+    """
+
+    index: SemanticIndexRecord = Field(default_factory=SemanticIndexRecord)
+
 
 class CaseResult(BaseModel):
     """Everything one case produced, written to `<root>/<question_id>/result.json`.
@@ -343,6 +438,10 @@ class CaseResult(BaseModel):
         qa: Stage three — is the final answer correct?
         supersede_integrity: The stricter second reading, on knowledge-update
             cases only.
+        semantic: The second arm — the same question asked again of an agent
+            that also has `semantic_search`, over the same memory. `None` when
+            the run did not ask for it, which is what tells a resumed run the
+            arm is still owed rather than merely empty.
         error: Set when the case failed outright.
     """
 
@@ -360,6 +459,7 @@ class CaseResult(BaseModel):
     retrieval: RetrievalVerdict = Field(default_factory=RetrievalVerdict)
     qa: QaVerdict = Field(default_factory=QaVerdict)
     supersede_integrity: QaVerdict | None = None
+    semantic: SemanticArm | None = None
     error: str | None = None
 
 
@@ -369,7 +469,9 @@ class ExperimentResult(BaseModel):
     Attributes:
         config: What was run.
         results: Every case result, in completion order.
-        summary: The aggregated metrics, as built by `dma_bench.metrics`.
+        summary: The aggregated metrics, as built by `dma_bench.metrics`. A run
+            that compared arms carries the semantic arm's own summary, of the
+            same shape, under its `semantic` key.
         finished_at: When the run ended.
     """
 

@@ -290,3 +290,163 @@ def test_a_case_that_blows_up_is_recorded_not_propagated(case, tmp_path):
 
     assert result.error is not None
     assert FAILURE in result.error
+
+
+def semantic_runtime(
+    fake_model, embeddings, *, agent_script=(), structured=None, store=None
+):
+    from langchain_core.vectorstores import InMemoryVectorStore
+
+    base = runtime(fake_model, agent_script=agent_script, structured=structured)
+    stores = {}
+
+    def build_store(model, case):
+        if store is not None:
+            return store(model, case)
+        return stores.setdefault(case.question_id, InMemoryVectorStore(model))
+
+    return Runtime(
+        agent_model=base.agent_model,
+        judge_model=base.judge_model,
+        embeddings=lambda: embeddings,
+        vector_store=build_store,
+    )
+
+
+def test_a_semantic_run_answers_the_same_case_through_both_arms(
+    case, fake_model, embeddings, tmp_path
+):
+    settings = config(tmp_path, semantic_search=True)
+
+    result = run_case(
+        case,
+        settings,
+        semantic_runtime(
+            fake_model,
+            embeddings,
+            agent_script=[write_call(), AIMessage(content="stored")],
+            structured=graded(),
+        ),
+    )
+
+    assert result.error is None
+    assert result.answer.attempted
+    assert result.semantic is not None
+    assert result.semantic.answer.attempted
+    assert result.semantic.index.error is None
+    assert result.semantic.index.chunks >= 1
+    assert result.qa.correct is result.semantic.qa.correct is True
+
+
+def test_the_semantic_agent_is_the_one_holding_semantic_search(
+    fake_model, embeddings, tmp_path
+):
+    from langchain_core.vectorstores import InMemoryVectorStore
+
+    from dma_bench.agents import build_search_agent
+
+    lexical = build_search_agent(fake_model(), tmp_path / "memory")
+    semantic = build_search_agent(
+        fake_model(),
+        tmp_path / "memory",
+        embeddings=embeddings,
+        vector_store=InMemoryVectorStore(embeddings),
+    )
+
+    assert "semantic_search" not in set(lexical.nodes["tools"].bound._tools_by_name)
+    assert "semantic_search" in set(semantic.nodes["tools"].bound._tools_by_name)
+    assert "semantic_ingest" not in set(semantic.nodes["tools"].bound._tools_by_name)
+
+
+def test_a_finished_case_pays_only_for_the_arm_it_is_missing(
+    case, fake_model, embeddings, tmp_path
+):
+    settings = config(tmp_path)
+    first = run_case(
+        case,
+        settings,
+        runtime(
+            fake_model,
+            agent_script=[write_call(), AIMessage(content="stored")],
+            structured=graded(),
+        ),
+    )
+    facts = case_directory(settings, case) / "memory" / "semantic_memory" / "facts.md"
+    written_once = facts.read_text()
+
+    second = run_case(
+        case,
+        settings.model_copy(update={"semantic_search": True}),
+        semantic_runtime(
+            fake_model,
+            embeddings,
+            agent_script=[write_call("a second, redundant write")],
+            structured=graded(),
+        ),
+    )
+
+    # The history was not replayed: the tree is byte for byte what it was, and
+    # the lexical arm is the one the first run graded.
+    assert facts.read_text() == written_once
+    assert second.ingestion == first.ingestion
+    assert second.answer.answer == first.answer.answer
+    assert second.semantic is not None
+    assert second.semantic.answer.attempted
+
+
+def test_a_case_missing_its_semantic_arm_is_still_pending(
+    case, fake_model, embeddings, tmp_path
+):
+    settings = config(tmp_path)
+    run_case(case, settings, runtime(fake_model, structured=graded()))
+    assert iter_pending([case], settings) == []
+
+    semantic = settings.model_copy(update={"semantic_search": True})
+    assert iter_pending([case], semantic) == [case]
+
+    run_case(
+        case, semantic, semantic_runtime(fake_model, embeddings, structured=graded())
+    )
+    assert iter_pending([case], semantic) == []
+
+
+def test_a_store_that_will_not_open_costs_the_semantic_arm_only(
+    case, fake_model, embeddings, tmp_path
+):
+    def explode(_model, _case):
+        raise RuntimeError(FAILURE)
+
+    result = run_case(
+        case,
+        config(tmp_path, semantic_search=True),
+        semantic_runtime(fake_model, embeddings, structured=graded(), store=explode),
+    )
+
+    assert result.error is None
+    assert result.answer.attempted
+    assert result.semantic is not None
+    assert FAILURE in (result.semantic.index.error or "")
+    assert not result.semantic.answer.attempted
+
+
+def test_a_run_asking_for_an_index_it_cannot_build_is_refused(
+    case, fake_model, tmp_path
+):
+    import pytest
+
+    with pytest.raises(ValueError, match="semantic_search"):
+        run_experiment(
+            [case],
+            config(tmp_path, semantic_search=True),
+            runtime(fake_model, structured=graded()),
+        )
+
+
+def test_the_estimate_doubles_the_answering_side_for_a_second_arm(case, tmp_path):
+    lexical = estimate_run([case], config(tmp_path))
+    both = estimate_run([case], config(tmp_path, semantic_search=True))
+
+    assert both["answer_invocations"] == 2 * lexical["answer_invocations"]
+    assert both["judge_invocations"] == 2 * lexical["judge_invocations"]
+    assert both["ingestion_invocations"] == lexical["ingestion_invocations"]
+    assert both["semantic_index_passes"] == 1

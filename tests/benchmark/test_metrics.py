@@ -147,3 +147,40 @@ def test_an_empty_run_summarises_to_nothing_rather_than_crashing():
     assert summary["cases"] == 0
     assert summary["qa_accuracy"] is None
     assert summary["decomposition"]["scored"] == 0
+
+
+def test_the_semantic_arm_is_summarised_beside_the_lexical_one():
+    from dma_bench.metrics import semantic_view
+    from dma_bench.schema import AnswerRecord, SemanticArm, SemanticIndexRecord
+
+    results = [
+        result(
+            "c1",
+            answer=False,
+            semantic=SemanticArm(
+                index=SemanticIndexRecord(added=3, chunks=4),
+                answer=AnswerRecord(answer="Enterprise", tool_calls=2),
+                retrieval=RetrievalVerdict(correct=True, recall=1.0),
+                qa=QaVerdict(correct=True),
+            ),
+        )
+    ]
+
+    summary = summarise(results)
+
+    assert summary["qa_accuracy"] == 0.0
+    assert summary["semantic"]["qa_accuracy"] == 1.0
+    assert summary["semantic"]["consolidation_correct_rate"] == 1.0
+    assert summary["cost"]["indexed_chunks"] == 4
+    assert "semantic" not in summary["semantic"]
+    assert [view.qa.correct for view in semantic_view(results)] == [True]
+
+
+def test_a_case_without_a_semantic_arm_is_left_out_of_its_summary():
+    from dma_bench.metrics import semantic_view
+
+    summary = summarise([result("c1"), result("c2")])
+
+    assert semantic_view([result("c1")]) == []
+    assert "semantic" not in summary
+    assert "indexed_chunks" not in summary["cost"]

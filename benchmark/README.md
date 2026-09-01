@@ -180,9 +180,50 @@ Configure the first cell, then run top to bottom. Output:
 <EXPERIMENT_ROOT>/result.json                 config + every case + the summary
 ```
 
-A case that already has a `result.json` is skipped, so an interrupted run resumes
-instead of paying twice. Cases run concurrently and share nothing — separate
-memory trees, separate agents, a context-local write clock.
+Cases run concurrently and share nothing — separate memory trees, separate
+agents, separate semantic indexes, a context-local write clock.
+
+Resume protects ingestion, which is where the tokens go. A case whose history has
+already been replayed keeps its memory tree, its snapshot and its stage-one
+verdict, and pays only for the answering arms it is still missing — so an
+interrupted run picks up where it stopped, and turning `SEMANTIC_SEARCH_ENABLE`
+on over a finished experiment costs one index and one question per case rather
+than the whole replay again. A case that ends in an error is looked at again on
+the next run; a replay cut short halfway is redone from the start, because
+answering out of half a memory would score something that was never measured.
+
+## Semantic search
+
+`SEMANTIC_SEARCH_ENABLE` in the first cell turns on the second arm. The memory
+tree is indexed once, **after the last session and before the question** — the
+same place the `final` consolidation pass runs, and for the same reason. In
+production `semantic_ingest` is the manager's own tool and the index trails the
+files by however long the agent takes to call it; measuring that lag here would
+score the run on when the last write landed rather than on what the tree holds.
+
+Every question is then asked twice over that one tree: once through the shipped
+search agent, once through the same agent holding `semantic_search` as well. The
+lexical arm is not optional. A semantic number with nothing beside it says
+nothing about whether the index helped, and because both arms share the
+ingestion, the tree and the stage-one verdict, the difference between them is the
+index and nothing else.
+
+The second arm lands under `semantic` in each `result.json` and, aggregated, under
+`summary["semantic"]` — the same shape as the summary beside it, so it goes
+through the same tables, the same three-stage decomposition and the same charts.
+Section 8 of the notebook puts the two side by side. Read retrieval before QA: an
+index that helps shows up as gold turns surfaced that lexical search missed, and
+QA moving while retrieval does not is the model answering from somewhere other
+than memory.
+
+Embeddings come from their own endpoint (`EMBEDDING_*`), because the chat models
+usually do not serve them and a local server costs nothing. Each case gets its
+own `InMemoryVectorStore`: two cases sharing an index would let one answer out of
+the other's memory, and the index is derived data — it is rebuilt from the tree
+in seconds, so a resumed case gets it back without re-ingesting a session. Swap
+`_vector_store` in the models cell for a persistent store if you want the index
+to outlive the run. Semantic search needs the package's optional `semantic`
+extra: `uv sync --extra semantic --group benchmark`.
 
 ## How the clock works, and why
 
@@ -213,6 +254,7 @@ dma_bench/
 ├── generation/      the operational ontology and its generator
 ├── agents.py        building the manager and search agents
 ├── ingest.py        replaying a history, session by session
+├── semantic.py      indexing a finished tree for the second arm
 ├── answer.py        asking the question, capturing the trace
 ├── judges/          consolidation, retrieval and QA graders
 ├── runner.py        orchestration, persistence, resume

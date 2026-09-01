@@ -6,7 +6,12 @@ results out in full.
 
 The charts are deliberately few. Per-category accuracy is what gets compared
 across runs; the decomposition is what says which prompt to go and change; the
-ablation chart is the one that answers whether consolidation earned its cost.
+ablation chart is the one that answers whether a change earned its cost —
+consolidation against none, or semantic search against lexical alone.
+
+Nothing here distinguishes the two arms of a semantic run from two separate
+experiments: the arm's summary has the same shape, so it goes through the same
+tables and the same charts, and a comparison is a dict of two summaries.
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "category_table",
+    "comparison_table",
     "cost_table",
     "decomposition_table",
     "plot_ablation",
@@ -86,6 +92,53 @@ def decomposition_table(summary: dict) -> pd.DataFrame:
         ]
     )
     return frame.sort_values("count", ascending=False).set_index("cell")
+
+
+def comparison_table(summaries: dict[str, dict]) -> pd.DataFrame:
+    """Put two or more runs of the same cases side by side.
+
+    The comparison this exists for is lexical against semantic search, where the
+    cases, the memory and the stage-one verdict are shared and only the answering
+    tools differ — but nothing here knows that, so it serves the consolidation
+    ablation just as well.
+
+    Args:
+        summaries: Run summaries keyed by the label to show.
+
+    Returns:
+        One column per run, one row per headline metric, with a `delta` column
+        against the first when there are exactly two. A metric no run has —
+        the superseded-leak rate, when no knowledge-update case was in the
+        sample — is left out rather than shown as a row of blanks.
+
+    Raises:
+        ValueError: If no summaries were given — an empty comparison is a
+            mistake upstream, not a table with no columns.
+    """
+    import pandas as pd
+
+    if not summaries:
+        msg = "comparison_table needs at least one summary"
+        raise ValueError(msg)
+
+    frame = pd.DataFrame(
+        {
+            label: {
+                **{name: summary.get(key) for key, name in _METRICS},
+                "Cases": summary.get("cases"),
+                "Superseded leak": (
+                    summary.get("by_category", {})
+                    .get("supersede-integrity", {})
+                    .get("superseded_leak_rate")
+                ),
+            }
+            for label, summary in summaries.items()
+        }
+    ).dropna(how="all")
+    if len(frame.columns) == 2:
+        first, second = frame.columns
+        frame["delta"] = frame[second] - frame[first]
+    return frame
 
 
 def cost_table(summary: dict) -> pd.DataFrame:
@@ -183,11 +236,12 @@ def plot_decomposition(summary: dict, *, title: str = "") -> Figure:
 
 
 def plot_ablation(summaries: dict[str, dict], *, title: str = "") -> Figure:
-    """Compare runs that differ only in when consolidation ran.
+    """Compare per-category accuracy across runs of the same cases.
 
     Args:
-        summaries: Run summaries keyed by the label to show, typically the
-            consolidation mode.
+        summaries: Run summaries keyed by the label to show — the consolidation
+            mode for the ablation, or `lexical` against `semantic` for the two
+            arms of one run.
         title: Optional chart title.
 
     Returns:
