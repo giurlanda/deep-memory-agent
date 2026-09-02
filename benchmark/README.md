@@ -104,6 +104,22 @@ uv run --group benchmark python -m dma_bench.generation.generator \
 shard routing, accumulated supersessions and repeated consolidation passes are
 actually exercised — the one thing the published datasets cannot offer.
 
+There are three shapes, and the middle one exists because the jump between the
+other two is a jump in spend, not in what is being measured:
+
+| `--config` | cases/category | evidence | distractors | span |
+| ---------- | -------------- | -------- | ----------- | ---- |
+| `small`    | 6              | 2        | 4           | 30 days |
+| `medium`   | 10             | 2        | 20          | 180 days |
+| `large`    | 12             | 3        | 45          | 240 days |
+
+`medium` keeps six months of timeline — enough that monthly sharding has several
+shards to route between — for 22 sessions per case against `large`'s 48, so it
+costs roughly half of a `large` run and still exercises routing over a long
+history. Each scale writes its own file (`operational_small.json`,
+`operational_medium.json`, `operational_large.json`) and is selected in the
+notebook with `SCALE`.
+
 `--config` fixes every dimension at once, though, and size is usually the one
 you want to move on its own — a two-case trial of the `large` timeline has no
 configuration of its own. `--cases-per-category` overrides just that number and

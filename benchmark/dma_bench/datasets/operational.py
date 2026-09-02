@@ -24,6 +24,7 @@ __all__ = ["CORPUS_FILES", "corpus_path", "load_cases"]
 
 CORPUS_FILES: dict[str, str] = {
     "small": "operational_small.json",
+    "medium": "operational_medium.json",
     "large": "operational_large.json",
 }
 """Which generated file backs each scale."""
@@ -34,7 +35,7 @@ def corpus_path(root: Path, scale: str) -> Path:
 
     Args:
         root: Directory holding the generated corpora.
-        scale: `small` or `large`.
+        scale: `small`, `medium` or `large`.
 
     Returns:
         Path to the JSON file.

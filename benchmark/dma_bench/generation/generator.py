@@ -15,7 +15,9 @@ LongMemEval's sessions are packed into about ten days, so monthly sharding never
 has more than a shard or two to route between. The `large` configuration spreads
 its sessions across roughly eight months, which is where shard routing,
 accumulated supersessions and repeated consolidation passes actually get
-exercised.
+exercised. The `medium` configuration keeps six months of that timeline for
+under half the sessions per case: the cheapest shape that still has several
+shards to route between.
 
 Run it once and keep the output:
 
@@ -117,6 +119,12 @@ CORPUS_SHAPES: dict[str, CorpusShape] = {
         distractor_sessions=4,
         span_days=30,
     ),
+    "medium": CorpusShape(
+        cases_per_category=10,
+        evidence_sessions=2,
+        distractor_sessions=20,
+        span_days=180,
+    ),
     "large": CorpusShape(
         cases_per_category=12,
         evidence_sessions=3,
@@ -124,7 +132,13 @@ CORPUS_SHAPES: dict[str, CorpusShape] = {
         span_days=240,
     ),
 }
-"""The two fixed shapes, mirroring the `small` and `large` LongMemEval scales."""
+"""The three fixed shapes.
+
+`small` and `large` mirror the LongMemEval scales. `medium` sits between them:
+six months of timeline, so monthly sharding still has several shards to route
+between, at less than half of `large`'s sessions per case — which is where the
+cost is.
+"""
 
 _SESSION_PROMPT = """\
 Write one working conversation between a user and their AI assistant, as it

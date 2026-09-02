@@ -43,8 +43,9 @@ def load_dataset(
     Args:
         dataset: `longmemeval` or `operational`.
         root: Directory holding that corpus' files.
-        scale: `small` or `large`; `longmemeval` also accepts a variant name
-            (`oracle`, `s`, `m`) directly.
+        scale: `small` or `large`, plus `medium` for `operational`;
+            `longmemeval` also accepts a variant name (`oracle`, `s`, `m`)
+            directly.
         categories: Categories to keep. `None` keeps whatever the corpus has.
         n_per_category: How many cases to keep per category.
         seed: Makes the sample reproducible.

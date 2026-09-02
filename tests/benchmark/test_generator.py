@@ -71,6 +71,21 @@ def test_the_large_shape_is_the_expensive_one():
     )
 
 
+def test_the_medium_shape_sits_between_the_other_two():
+    # The point of `medium` is the middle of the cost range, not a third corner
+    # of it: a long timeline like `large`'s, at a spend closer to `small`'s.
+    small, medium, large = (
+        CORPUS_SHAPES[name] for name in ("small", "medium", "large")
+    )
+
+    assert (
+        calls_per_category(small)
+        < calls_per_category(medium)
+        < calls_per_category(large)
+    )
+    assert small.span_days < medium.span_days < large.span_days
+
+
 def test_the_case_count_can_be_overridden_without_moving_anything_else():
     cases = generate_corpus(
         CountingModel(),

@@ -5,6 +5,25 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `dma_bench.report.plot_metric_comparison`, a headline chart putting whole-run
+  metrics side by side across arms — the companion to `plot_ablation`, which
+  breaks a single metric down per category. Section 8 of the benchmark notebook
+  now draws retrieval correct and retrieval recall for the lexical and semantic
+  arms ahead of the QA chart, since retrieval is the number that says whether
+  the index earned its cost.
+- A `medium` corpus shape for the operational generator, between `small` and
+  `large`: 10 cases per category, 2 evidence and 20 distractor sessions each,
+  spread over 180 days. The jump from `small` to `large` was a jump in spend
+  rather than in what is measured — `medium` keeps a six-month timeline, so
+  monthly sharding still has several shards to route between, at 22 sessions per
+  case against `large`'s 48. Generated with
+  `--config medium`, loaded as `SCALE = "medium"` from
+  `benchmark/data/operational_medium.json`.
+
 ## [0.2.0] - 2026-09-01
 
 ### Added
