@@ -5,25 +5,6 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Added
-
-- `dma_bench.report.plot_metric_comparison`, a headline chart putting whole-run
-  metrics side by side across arms — the companion to `plot_ablation`, which
-  breaks a single metric down per category. Section 8 of the benchmark notebook
-  now draws retrieval correct and retrieval recall for the lexical and semantic
-  arms ahead of the QA chart, since retrieval is the number that says whether
-  the index earned its cost.
-- A `medium` corpus shape for the operational generator, between `small` and
-  `large`: 10 cases per category, 2 evidence and 20 distractor sessions each,
-  spread over 180 days. The jump from `small` to `large` was a jump in spend
-  rather than in what is measured — `medium` keeps a six-month timeline, so
-  monthly sharding still has several shards to route between, at 22 sessions per
-  case against `large`'s 48. Generated with
-  `--config medium`, loaded as `SCALE = "medium"` from
-  `benchmark/data/operational_medium.json`.
-
 ## [0.2.0] - 2026-09-01
 
 ### Added
@@ -72,6 +53,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   three-stage decomposition and the same charts.
 - `dma_bench.report.comparison_table` and `dma_bench.metrics.semantic_view`, plus
   a section in the notebook putting the two arms side by side.
+- `dma_bench.report.plot_metric_comparison`, a headline chart putting whole-run
+  metrics side by side across arms — the companion to `plot_ablation`, which
+  breaks a single metric down per category. Section 8 of the benchmark notebook
+  now draws retrieval correct and retrieval recall for the lexical and semantic
+  arms ahead of the QA chart, since retrieval is the number that says whether
+  the index earned its cost.
+- A `medium` corpus shape for the operational generator, between `small` and
+  `large`: 10 cases per category, 2 evidence and 20 distractor sessions each,
+  spread over 180 days. The jump from `small` to `large` was a jump in spend
+  rather than in what is measured — `medium` keeps a six-month timeline, so
+  monthly sharding still has several shards to route between, at 22 sessions per
+  case against `large`'s 48. Generated with
+  `--config medium`, loaded as `SCALE = "medium"` from
+  `benchmark/data/operational_medium.json`.
+
+- `dma_bench.generation.validation`, and the `--no-validate`,
+  `--max-session-retries`, `--validator-model`, `--validator-base-url` and
+  `--validator-api-key` flags on the generator. A rejected session is rewritten
+  with the reason it was rejected, up to the retry budget (2 by default); one
+  that never holds up is dropped when it was a distractor and abandons the case
+  when it was evidence. The validator defaults to the writing model on the same
+  provider, each flag falling back to its primary counterpart. Validation is on
+  by default and roughly doubles the calls per session; `--no-validate` restores
+  the previous cost. ([#12])
 
 ### Changed
 
@@ -88,7 +93,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   active, the built-in prompts gain a section on it — a `system_prompt` of your
   own still replaces the prompt whole, that section included.
 
+### Fixed
+
+- The operational generator no longer infers who spoke from a turn's position in
+  the list. Turns come back from the model with their own `role`, and
+  `has_answer` follows that role instead of the same parity — a model that
+  answered twice in a row used to have every turn after it labelled with the
+  wrong speaker, and handed the retrieval judge a gold set pointing at assistant
+  turns. Measured on the corpora already generated: 33 mislabelled turns across
+  8 sessions in a `medium` run, 159 across 46 sessions in `operational_large`.
+  The corpora on disk still carry the defect and need regenerating. ([#12])
+- Every generated session is now checked before it is kept. A structural pass
+  rejects conversations that do not alternate, do not start with the user, hold
+  two speakers in one turn, or answer with a placeholder, and takes off any
+  speaker label that leaked into the text — `ingest` renders the role itself, so
+  a turn stored as `USER: …` reached memory with the label printed twice. A
+  second model then judges what only reading the conversation reveals: whether it
+  is a genuine two-party exchange, and whether the material the session had to
+  carry actually came through. ([#12])
+
 [#10]: https://github.com/giurlanda/deep-memory-agent/issues/10
+[#12]: https://github.com/giurlanda/deep-memory-agent/issues/12
 
 ## [0.1.4] - 2026-08-31
 
@@ -176,7 +201,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `MemoryStore`, `build_memory_backend`, `resolve_backend` and
   `ensure_memory_tree` as the supporting public surface.
 
-[Unreleased]: https://github.com/giurlanda/deep-memory-agent/compare/v0.1.2...HEAD
+[0.2.0]: https://github.com/giurlanda/deep-memory-agent/compare/v0.1.4...v0.2.0
 [0.1.2]: https://github.com/giurlanda/deep-memory-agent/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/giurlanda/deep-memory-agent/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/giurlanda/deep-memory-agent/releases/tag/v0.1.0

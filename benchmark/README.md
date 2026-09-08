@@ -134,6 +134,52 @@ uv run --group benchmark python -m dma_bench.generation.generator \
 `generate_corpus(..., cases_per_category=2)` is the same override from Python,
 for the notebook.
 
+### Checking what came back
+
+The generating model is asked for a conversation and told the turns have to
+alternate; nothing used to check that it obliged. It does not always. A model
+that answers twice in a row, signs its turns `USER:` / `Me:` / `AI:`, collapses
+both speakers into one string, or replies with `...` returns something that
+looks well-formed and is not — and since the corpus is generated once and reused
+by every run afterwards, a session that is wrong is wrong for the life of the
+file.
+
+So every session is checked before it is kept. First structurally, which is free:
+the conversation has to start with the user and alternate, no turn may be empty
+or a placeholder, hold two speakers at once, or carry a speaker label in its text
+— a leading label is taken off rather than being grounds for rejection, since
+`ingest` renders the role itself and would otherwise print it twice. Then by a
+second model, for the two things only reading the conversation reveals: that it
+is a genuine two-party exchange rather than one side narrating both, and that the
+material the session had to carry actually came through, incidentally, as the
+prompt asked.
+
+A rejected session is rewritten, with the reason it was rejected fed back into
+the prompt, up to `--max-session-retries` times (2 by default). One that never
+holds up is dropped when it was a distractor — it was noise, and one fewer
+changes nothing — and abandons the whole case when it was evidence, because the
+question is written from the evidence and a case that lost it asks about material
+the corpus no longer carries.
+
+The validator defaults to the model that wrote the session, on the same
+provider: the question is not whether a stronger model would have written it
+better, but whether this one did what it was asked. Each of the three flags falls
+back to its primary counterpart, so judging with a stronger model behind another
+endpoint needs only the flags that actually differ:
+
+```bash
+uv run --group benchmark python -m dma_bench.generation.generator \
+    --config medium --out benchmark/data/operational_medium.json \
+    --model qwen2.5:3b --base-url http://localhost:11434/v1 \
+    --validator-model gpt-4o --validator-base-url https://api.openai.com/v1 \
+    --validator-api-key "$OPENAI_API_KEY"
+```
+
+Validation roughly doubles the calls per session and retries can triple that
+again, which the progress bars are sized for. `--no-validate` turns it off and
+keeps whatever the model returns, at the original cost;
+`generate_corpus(..., validate=False)` is the same from Python.
+
 ### Resuming, and growing a corpus
 
 A `large` run is a thousand-odd model calls and takes hours, so nothing is

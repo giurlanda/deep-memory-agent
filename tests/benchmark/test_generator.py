@@ -14,6 +14,7 @@ from dma_bench.generation.generator import (
     calls_per_category,
     generate_corpus,
     load_corpus,
+    session_budget,
     write_corpus,
 )
 
@@ -21,12 +22,26 @@ SHAPE = CorpusShape(
     cases_per_category=2, evidence_sessions=1, distractor_sessions=1, span_days=10
 )
 
+GOOD_TURNS = [
+    ("user", "can you look at the Northfield job that ran overnight?"),
+    ("assistant", "pulling it up now, it tripped around two in the morning"),
+]
+
 
 class CountingModel(BaseChatModel):
-    """Records every structured-output call and can be told to fail some."""
+    """Records every structured-output call and can be told to misbehave.
+
+    `fail` names a schema whose calls raise. `turns` is what a session comes back
+    as. `rejections` is how many verdicts come back unusable before one passes,
+    which is how the retry budget is exercised without a real validator.
+    """
 
     calls: list[str] = Field(default_factory=list)
+    prompts: list[str] = Field(default_factory=list)
     fail: str = ""
+    turns: list[tuple[str, str]] = Field(default_factory=lambda: list(GOOD_TURNS))
+    rejections: int = 0
+    reject_matching: str = ""
 
     @property
     def _llm_type(self) -> str:
@@ -36,13 +51,23 @@ class CountingModel(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=None)])
 
     def with_structured_output(self, schema, **kwargs):  # noqa: ARG002
-        def run(_):
+        def run(prompt):
             self.calls.append(schema.__name__)
+            self.prompts.append(str(prompt))
             if schema.__name__ == self.fail:
                 msg = "no service"
                 raise RuntimeError(msg)
-            if schema.__name__ == "_GeneratedSession":
-                return schema(turns=["something happened", "noted"])
+            if schema.__name__ == "GeneratedSession":
+                return schema(
+                    turns=[{"role": role, "content": text} for role, text in self.turns]
+                )
+            if schema.__name__ == "SessionVerdict":
+                if self.rejections > 0:
+                    self.rejections -= 1
+                    return schema(usable=False, reason="the payload never came through")
+                if self.reject_matching and self.reject_matching in str(prompt):
+                    return schema(usable=False, reason="nothing of the payload landed")
+                return schema(usable=True)
             return schema(question="what now?", answer="follow the steps")
 
         return RunnableLambda(run)
@@ -55,9 +80,14 @@ def recorder(log):
     @contextmanager
     def fake(label, total, *, enabled):
         log.append(("bar", label, total, enabled))
-        yield lambda detail: log.append(("step", detail))
+        yield lambda detail, steps=1: log.append(("step", detail, steps))
 
     yield fake
+
+
+def stepped(log):
+    """Return how far the bar was actually moved."""
+    return sum(entry[2] for entry in log if entry[0] == "step")
 
 
 def test_the_call_count_covers_every_session_and_every_question():
@@ -180,6 +210,8 @@ def test_progress_is_off_by_request_and_never_touches_tqdm(monkeypatch):
             CountingModel(),
             SHAPE,
             categories=[BenchCategory.PROCEDURAL_RETRIEVAL],
+            validate=False,
+            max_session_retries=0,
             progress=False,
         )
 
@@ -192,7 +224,13 @@ def test_there_is_one_bar_per_category(monkeypatch):
     log = []
     with recorder(log) as fake:
         monkeypatch.setattr(generator, "_progress", fake)
-        generate_corpus(CountingModel(), SHAPE, progress=True)
+        generate_corpus(
+            CountingModel(),
+            SHAPE,
+            validate=False,
+            max_session_retries=0,
+            progress=True,
+        )
 
     bars = [entry for entry in log if entry[0] == "bar"]
     assert [entry[1] for entry in bars] == ["procedural-retrieval", "non-repetition"]
@@ -211,13 +249,15 @@ def test_the_bar_is_sized_from_the_overridden_count(monkeypatch):
             SHAPE,
             categories=[BenchCategory.NON_REPETITION],
             cases_per_category=1,
+            validate=False,
+            max_session_retries=0,
             progress=True,
         )
 
     assert [entry for entry in log if entry[0] == "bar"] == [
         ("bar", "non-repetition", 3, True)
     ]
-    assert len([entry for entry in log if entry[0] == "step"]) == 3
+    assert stepped(log) == 3
 
 
 def test_the_bar_reaches_its_total(monkeypatch):
@@ -228,11 +268,12 @@ def test_the_bar_reaches_its_total(monkeypatch):
             CountingModel(),
             SHAPE,
             categories=[BenchCategory.PROCEDURAL_RETRIEVAL],
+            validate=False,
+            max_session_retries=0,
             progress=True,
         )
 
-    steps = [entry for entry in log if entry[0] == "step"]
-    assert len(steps) == calls_per_category(SHAPE)
+    assert stepped(log) == calls_per_category(SHAPE)
 
 
 def test_the_bar_still_reaches_its_total_when_every_session_fails(monkeypatch):
@@ -242,16 +283,16 @@ def test_the_bar_still_reaches_its_total_when_every_session_fails(monkeypatch):
     with recorder(log) as fake:
         monkeypatch.setattr(generator, "_progress", fake)
         cases = generate_corpus(
-            CountingModel(fail="_GeneratedSession"),
+            CountingModel(fail="GeneratedSession"),
             SHAPE,
             categories=[BenchCategory.PROCEDURAL_RETRIEVAL],
+            validate=False,
+            max_session_retries=0,
             progress=True,
         )
 
     assert cases == []
-    assert len([entry for entry in log if entry[0] == "step"]) == calls_per_category(
-        SHAPE
-    )
+    assert stepped(log) == calls_per_category(SHAPE)
     assert [entry[1] for entry in log if entry[0] == "step"][-1].endswith("abandoned")
 
 
@@ -471,6 +512,8 @@ def test_the_bar_is_sized_from_what_is_left_to_generate(tmp_path, monkeypatch):
             CountingModel(),
             SHAPE,
             categories=[BenchCategory.NON_REPETITION],
+            validate=False,
+            max_session_retries=0,
             progress=True,
             out=out,
         )
@@ -527,3 +570,343 @@ def test_the_cli_explains_that_an_existing_out_is_resumed():
 
     action = next(a for a in parser._actions if a.dest == "out")
     assert "resumed" in (action.help or "")
+
+
+ONLY_EVIDENCE = CorpusShape(
+    cases_per_category=1, evidence_sessions=1, distractor_sessions=0, span_days=10
+)
+
+
+FOUR_TURNS = [
+    ("user", "can you look at the overnight job?"),
+    ("assistant", "pulling it up, it tripped at two"),
+    ("user", "right. how bad is the gap on the rollups?"),
+    ("assistant", "about forty thousand rows, staged for her to check"),
+]
+
+OFFSET_TURNS = [
+    ("user", "can you look at the overnight job?"),
+    ("assistant", "pulling it up, it tripped at two"),
+    ("assistant", "scratch database is up, diffing the tables now"),
+    ("user", "good, that is what she needs. how bad is the gap?"),
+]
+
+
+def test_the_role_of_a_turn_is_the_one_the_model_declared():
+    model = CountingModel(turns=FOUR_TURNS)
+
+    cases = generate_corpus(
+        model,
+        ONLY_EVIDENCE,
+        categories=[BenchCategory.PROCEDURAL_RETRIEVAL],
+        validate=False,
+        max_session_retries=0,
+        progress=False,
+    )
+
+    turns = cases[0].sessions[0].turns
+    assert [(turn.role, turn.content) for turn in turns] == FOUR_TURNS
+
+
+def test_a_conversation_that_does_not_alternate_never_enters_the_corpus():
+    # The bug this replaces: roles came from the turn's position, so a model that
+    # answered twice in a row had everything after it silently relabelled. Now
+    # the disagreement is caught instead of papered over.
+    model = CountingModel(turns=OFFSET_TURNS)
+
+    cases = generate_corpus(
+        model,
+        ONLY_EVIDENCE,
+        categories=[BenchCategory.PROCEDURAL_RETRIEVAL],
+        validate=False,
+        progress=False,
+    )
+
+    assert cases == []
+
+
+def test_a_conversation_that_opens_with_the_assistant_never_enters_the_corpus():
+    model = CountingModel(turns=[("assistant", "pulling it up, it tripped at two")])
+
+    cases = generate_corpus(
+        model,
+        ONLY_EVIDENCE,
+        categories=[BenchCategory.NON_REPETITION],
+        validate=False,
+        progress=False,
+    )
+
+    assert cases == []
+
+
+def test_gold_turns_are_the_user_turns_of_an_evidence_session():
+    # `has_answer` used to be derived from the same parity as the role, so a
+    # slipped session handed the retrieval judge assistant turns as gold.
+    model = CountingModel(turns=FOUR_TURNS)
+
+    cases = generate_corpus(
+        model,
+        ONLY_EVIDENCE,
+        categories=[BenchCategory.PROCEDURAL_RETRIEVAL],
+        validate=False,
+        max_session_retries=0,
+        progress=False,
+    )
+
+    gold = cases[0].gold_turns
+    assert [turn.role for turn in gold] == ["user", "user"]
+    assert [turn.turn_id.split("#")[-1] for turn in gold] == ["0", "2"]
+
+
+def test_a_speaker_label_never_reaches_the_corpus():
+    model = CountingModel(
+        turns=[
+            ("user", "USER: can you look at the overnight job?"),
+            ("assistant", "Assistant: pulling it up, it tripped at two"),
+        ]
+    )
+
+    cases = generate_corpus(
+        model,
+        ONLY_EVIDENCE,
+        categories=[BenchCategory.NON_REPETITION],
+        validate=False,
+        max_session_retries=0,
+        progress=False,
+    )
+
+    contents = [turn.content for turn in cases[0].sessions[0].turns]
+    assert contents == [
+        "can you look at the overnight job?",
+        "pulling it up, it tripped at two",
+    ]
+
+
+def test_a_session_is_validated_by_the_model_that_wrote_it_by_default():
+    model = CountingModel()
+
+    generate_corpus(
+        model,
+        ONLY_EVIDENCE,
+        categories=[BenchCategory.PROCEDURAL_RETRIEVAL],
+        progress=False,
+    )
+
+    assert model.calls.count("SessionVerdict") == 1
+
+
+def test_a_validator_of_its_own_takes_the_judging_off_the_writer():
+    model = CountingModel()
+    judge = CountingModel()
+
+    generate_corpus(
+        model,
+        ONLY_EVIDENCE,
+        categories=[BenchCategory.PROCEDURAL_RETRIEVAL],
+        validator=judge,
+        progress=False,
+    )
+
+    assert "SessionVerdict" not in model.calls
+    assert judge.calls == ["SessionVerdict"]
+
+
+def test_validation_can_be_turned_off():
+    model = CountingModel()
+
+    generate_corpus(
+        model,
+        ONLY_EVIDENCE,
+        categories=[BenchCategory.PROCEDURAL_RETRIEVAL],
+        validate=False,
+        progress=False,
+    )
+
+    assert "SessionVerdict" not in model.calls
+
+
+def test_a_rejected_session_is_written_again_with_the_reason_it_was_rejected():
+    model = CountingModel(rejections=1)
+
+    cases = generate_corpus(
+        model,
+        ONLY_EVIDENCE,
+        categories=[BenchCategory.PROCEDURAL_RETRIEVAL],
+        progress=False,
+    )
+
+    assert model.calls.count("GeneratedSession") == 2
+    assert len(cases) == 1
+    retry = model.prompts[2]
+    assert "rejected: the payload never came through" in retry
+
+
+def test_a_session_is_only_rewritten_as_many_times_as_the_budget_allows():
+    model = CountingModel(rejections=99)
+
+    generate_corpus(
+        model,
+        ONLY_EVIDENCE,
+        categories=[BenchCategory.PROCEDURAL_RETRIEVAL],
+        max_session_retries=3,
+        progress=False,
+    )
+
+    assert model.calls.count("GeneratedSession") == 4
+
+
+def test_a_distractor_that_never_holds_up_is_dropped_and_the_case_survives():
+    # Distractor payloads are the only ones that talk about routine work, so
+    # this rejects those and leaves the evidence alone.
+    model = CountingModel(reject_matching="Routine work on this account")
+
+    cases = generate_corpus(
+        model,
+        SHAPE,
+        categories=[BenchCategory.PROCEDURAL_RETRIEVAL],
+        cases_per_category=1,
+        progress=False,
+    )
+
+    assert len(cases) == 1
+    assert [session.is_evidence for session in cases[0].sessions] == [True]
+
+
+def test_an_evidence_session_that_never_holds_up_abandons_the_case():
+    # The question is written from the evidence, so a case that lost it would
+    # ask about material the corpus no longer carries.
+    model = CountingModel(rejections=99)
+
+    cases = generate_corpus(
+        model,
+        ONLY_EVIDENCE,
+        categories=[BenchCategory.PROCEDURAL_RETRIEVAL],
+        progress=False,
+    )
+
+    assert cases == []
+    assert "_GeneratedQuestion" not in model.calls
+
+
+def test_the_bar_still_reaches_its_total_when_sessions_are_retried(monkeypatch):
+    log = []
+    with recorder(log) as fake:
+        monkeypatch.setattr(generator, "_progress", fake)
+        generate_corpus(
+            CountingModel(rejections=1),
+            SHAPE,
+            categories=[BenchCategory.PROCEDURAL_RETRIEVAL],
+            progress=True,
+        )
+
+    budget = session_budget(validate=True, max_retries=2)
+    assert [entry[2] for entry in log if entry[0] == "bar"] == [
+        calls_per_category(SHAPE, budget=budget)
+    ]
+    assert stepped(log) == calls_per_category(SHAPE, budget=budget)
+
+
+def test_the_bar_still_reaches_its_total_when_a_case_is_abandoned(monkeypatch):
+    log = []
+    with recorder(log) as fake:
+        monkeypatch.setattr(generator, "_progress", fake)
+        generate_corpus(
+            CountingModel(rejections=99),
+            SHAPE,
+            categories=[BenchCategory.PROCEDURAL_RETRIEVAL],
+            progress=True,
+        )
+
+    budget = session_budget(validate=True, max_retries=2)
+    assert stepped(log) == calls_per_category(SHAPE, budget=budget)
+
+
+def test_a_validated_run_costs_more_than_an_unvalidated_one():
+    assert calls_per_category(
+        SHAPE, budget=session_budget(validate=True, max_retries=2)
+    ) > calls_per_category(SHAPE, budget=session_budget())
+
+
+def test_the_cli_validates_by_default_and_can_be_told_not_to():
+    parser = generator._build_parser()
+
+    assert parser.parse_args(["--out", "x.json"]).validate is True
+    assert parser.parse_args(["--out", "x.json", "--no-validate"]).validate is False
+
+
+def test_the_cli_takes_a_retry_budget_and_defaults_it_to_two():
+    parser = generator._build_parser()
+
+    assert parser.parse_args(["--out", "x.json"]).max_session_retries == 2
+    assert (
+        parser.parse_args(
+            ["--out", "x.json", "--max-session-retries", "0"]
+        ).max_session_retries
+        == 0
+    )
+
+
+def test_the_cli_refuses_a_negative_retry_budget():
+    with pytest.raises(SystemExit):
+        generator._build_parser().parse_args(
+            ["--out", "x.json", "--max-session-retries", "-1"]
+        )
+
+
+def test_the_validator_falls_back_to_the_provider_of_the_writing_model():
+    args = generator._build_parser().parse_args(
+        [
+            "--out",
+            "x.json",
+            "--model",
+            "qwen",
+            "--base-url",
+            "http://local",
+            "--api-key",
+            "secret",
+        ]
+    )
+    built = {}
+
+    def factory(**kwargs):
+        built.update(kwargs)
+        return "model"
+
+    generator._build_validator(args, factory)
+
+    assert built["model"] == "qwen"
+    assert built["base_url"] == "http://local"
+    assert built["api_key"] == "secret"
+    assert built["temperature"] == 0
+
+
+def test_the_validator_can_be_pointed_at_a_provider_of_its_own():
+    args = generator._build_parser().parse_args(
+        [
+            "--out",
+            "x.json",
+            "--model",
+            "qwen",
+            "--base-url",
+            "http://local",
+            "--api-key",
+            "secret",
+            "--validator-model",
+            "gpt-4o",
+            "--validator-base-url",
+            "https://api.openai.com/v1",
+            "--validator-api-key",
+            "other",
+        ]
+    )
+    built = {}
+
+    def factory(**kwargs):
+        built.update(kwargs)
+        return "model"
+
+    generator._build_validator(args, factory)
+
+    assert built["model"] == "gpt-4o"
+    assert built["base_url"] == "https://api.openai.com/v1"
+    assert built["api_key"] == "other"
