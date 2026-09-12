@@ -180,7 +180,7 @@ class RunConfig(BaseModel):
 
     experiment_root: str
     dataset: str = "longmemeval"
-    scale: Literal["small", "large"] = "small"
+    scale: Literal["small", "medium", "large"] = "small"
     n_per_category: int = 3
     consolidation_mode: ConsolidationMode = "none"
     consolidate_every_n: int = 10

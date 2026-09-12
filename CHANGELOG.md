@@ -67,6 +67,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   case against `large`'s 48. Generated with
   `--config medium`, loaded as `SCALE = "medium"` from
   `benchmark/data/operational_medium.json`.
+- A `medium` scale for LongMemEval too, so the choice is no longer between two
+  sessions per case and forty-eight. It loads `longmemeval_s_10.json`: the `s`
+  haystack with distractor sessions dropped at random until each question is
+  down to ten, which leaves every evidence session in place — the questions are
+  exactly as answerable as at `large`, there is just a fifth of the hay to
+  ingest. Produced by the new `benchmark/longmemeval/data/shrink_haystack.py`,
+  which streams its input, so it thins the 2.7 GB `m` file as readily as `s`.
 
 - `dma_bench.generation.validation`, and the `--no-validate`,
   `--max-session-retries`, `--validator-model`, `--validator-base-url` and

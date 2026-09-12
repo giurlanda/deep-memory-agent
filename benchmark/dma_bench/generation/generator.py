@@ -151,7 +151,7 @@ CORPUS_SHAPES: dict[str, CorpusShape] = {
     "medium": CorpusShape(
         cases_per_category=10,
         evidence_sessions=2,
-        distractor_sessions=20,
+        distractor_sessions=10,
         span_days=180,
     ),
     "large": CorpusShape(

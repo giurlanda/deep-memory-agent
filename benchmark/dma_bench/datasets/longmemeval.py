@@ -1,13 +1,21 @@
 """Adapter from the published LongMemEval datasets to `Case`.
 
 Three files ship with the paper and all three have the same shape — what
-changes is how much hay surrounds the needle:
+changes is how much hay surrounds the needle. A fourth is derived locally, so
+that the two published extremes are not the only choices:
 
 | file | sessions per question | span | role here |
 | --- | --- | --- | --- |
 | `longmemeval_oracle.json` | ~2 | 1 month | the `small` scale: the pipeline cold |
+| `longmemeval_s_10.json` | 10 | ~10 days | the `medium` scale: derived, see below |
 | `longmemeval_s_cleaned.json` | ~48 | ~10 days | the `large` scale |
 | `longmemeval_m_cleaned.json` | ~480 | ~10 days | 5 MB of history per question |
+
+`longmemeval_s_10.json` is not published: it is `s` with distractor sessions
+dropped at random until each question is down to ten, produced by
+`benchmark/longmemeval/data/shrink_haystack.py`. Evidence sessions are never
+dropped, so the questions stay exactly as answerable as they are in `s` — what
+changes is how much hay the pipeline pays to ingest.
 
 Timestamps are left exactly as they are. Stretching them over six months would
 give the sharding more to do, but the questions quote absolute dates inside the
@@ -47,18 +55,22 @@ __all__ = [
 
 DATASET_FILES: dict[str, str] = {
     "oracle": "longmemeval_oracle.json",
+    "s10": "longmemeval_s_10.json",
     "s": "longmemeval_s_cleaned.json",
     "m": "longmemeval_m_cleaned.json",
 }
 """Which file backs each LongMemEval variant."""
 
-SCALE_DATASETS: dict[str, str] = {"small": "oracle", "large": "s"}
-"""The two fixed scales.
+SCALE_DATASETS: dict[str, str] = {"small": "oracle", "medium": "s10", "large": "s"}
+"""The three fixed scales.
 
 `small` is the evidence sessions alone: a couple of sessions, one shard, nothing
-consolidated yet — the cold pipeline. `large` adds the distractors. `m` stays
-available by name but is not wired to a scale: at ~480 sessions per question it
-is a different order of spend.
+consolidated yet — the cold pipeline. `large` adds every distractor the dataset
+ships. `medium` sits between them at ten sessions per question — enough hay for
+sharding and search to have something to do, at roughly a fifth of the ingestion
+`large` costs, and it is the same evidence either way. `m` stays available by
+name but is not wired to a scale: at ~480 sessions per question it is a
+different order of spend.
 """
 
 _TIMESTAMP = re.compile(r"(\d{4})/(\d{2})/(\d{2})[^\d]*(\d{2}):(\d{2})")
@@ -70,7 +82,7 @@ def dataset_path(root: Path, variant: str) -> Path:
 
     Args:
         root: Directory holding the downloaded datasets.
-        variant: One of `oracle`, `s`, `m`, or a scale name.
+        variant: One of `oracle`, `s10`, `s`, `m`, or a scale name.
 
     Returns:
         Path to the JSON file.

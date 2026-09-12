@@ -150,6 +150,12 @@ def test_scales_resolve_to_the_published_files(tmp_path):
     assert dataset_path(tmp_path, "m").name == "longmemeval_m_cleaned.json"
 
 
+def test_medium_resolves_to_the_thinned_haystack(tmp_path):
+    # Derived from `s` by shrink_haystack.py, not published with the paper.
+    assert dataset_path(tmp_path, "medium").name == "longmemeval_s_10.json"
+    assert dataset_path(tmp_path, "s10") == dataset_path(tmp_path, "medium")
+
+
 def test_an_unknown_variant_is_rejected(tmp_path):
     with pytest.raises(ValueError, match="unknown LongMemEval variant"):
         dataset_path(tmp_path, "xl")
