@@ -75,6 +75,29 @@ therefore also given
 a deny rule enforced by the filesystem middleware, so recall stays read-only even
 if you add tools of your own.
 
+That deny rule guards the *filesystem*. It has nothing to say about a tool that
+talks to an external service, which is why the recall agent is never handed
+`semantic_ingest` — see [Semantic search](semantic-search.md).
+
+## Searching by meaning
+
+`memory_search` matches substrings, so it misses a question phrased differently
+from the entry that answers it. Hand either factory an `embeddings` model and a
+`vector_store` and the agents also get an embedding index over the same entries:
+
+```python
+manager = create_memory_manager_agent(
+    "claude-sonnet-5",
+    memory_dir="./memory",
+    embeddings=embeddings,
+    vector_store=vector_store,
+)
+```
+
+It needs the optional `semantic` extra, and it is derived data — the markdown
+files stay the source of truth. [Semantic search](semantic-search.md) covers
+chunking, filters, the manifest and how to refresh the index from a job.
+
 ## Consolidating from code
 
 Consolidation is a plain function as well as a tool, so a nightly job can run it

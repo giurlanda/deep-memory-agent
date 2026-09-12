@@ -6,7 +6,12 @@ results out in full.
 
 The charts are deliberately few. Per-category accuracy is what gets compared
 across runs; the decomposition is what says which prompt to go and change; the
-ablation chart is the one that answers whether consolidation earned its cost.
+ablation chart is the one that answers whether a change earned its cost —
+consolidation against none, or semantic search against lexical alone.
+
+Nothing here distinguishes the two arms of a semantic run from two separate
+experiments: the arm's summary has the same shape, so it goes through the same
+tables and the same charts, and a comparison is a dict of two summaries.
 """
 
 from __future__ import annotations
@@ -14,6 +19,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     import pandas as pd
     from matplotlib.figure import Figure
 
@@ -21,11 +28,13 @@ if TYPE_CHECKING:
 
 __all__ = [
     "category_table",
+    "comparison_table",
     "cost_table",
     "decomposition_table",
     "plot_ablation",
     "plot_accuracy_by_category",
     "plot_decomposition",
+    "plot_metric_comparison",
     "plot_recall_vs_accuracy",
 ]
 
@@ -86,6 +95,53 @@ def decomposition_table(summary: dict) -> pd.DataFrame:
         ]
     )
     return frame.sort_values("count", ascending=False).set_index("cell")
+
+
+def comparison_table(summaries: dict[str, dict]) -> pd.DataFrame:
+    """Put two or more runs of the same cases side by side.
+
+    The comparison this exists for is lexical against semantic search, where the
+    cases, the memory and the stage-one verdict are shared and only the answering
+    tools differ — but nothing here knows that, so it serves the consolidation
+    ablation just as well.
+
+    Args:
+        summaries: Run summaries keyed by the label to show.
+
+    Returns:
+        One column per run, one row per headline metric, with a `delta` column
+        against the first when there are exactly two. A metric no run has —
+        the superseded-leak rate, when no knowledge-update case was in the
+        sample — is left out rather than shown as a row of blanks.
+
+    Raises:
+        ValueError: If no summaries were given — an empty comparison is a
+            mistake upstream, not a table with no columns.
+    """
+    import pandas as pd
+
+    if not summaries:
+        msg = "comparison_table needs at least one summary"
+        raise ValueError(msg)
+
+    frame = pd.DataFrame(
+        {
+            label: {
+                **{name: summary.get(key) for key, name in _METRICS},
+                "Cases": summary.get("cases"),
+                "Superseded leak": (
+                    summary.get("by_category", {})
+                    .get("supersede-integrity", {})
+                    .get("superseded_leak_rate")
+                ),
+            }
+            for label, summary in summaries.items()
+        }
+    ).dropna(how="all")
+    if len(frame.columns) == 2:
+        first, second = frame.columns
+        frame["delta"] = frame[second] - frame[first]
+    return frame
 
 
 def cost_table(summary: dict) -> pd.DataFrame:
@@ -183,11 +239,12 @@ def plot_decomposition(summary: dict, *, title: str = "") -> Figure:
 
 
 def plot_ablation(summaries: dict[str, dict], *, title: str = "") -> Figure:
-    """Compare runs that differ only in when consolidation ran.
+    """Compare per-category accuracy across runs of the same cases.
 
     Args:
-        summaries: Run summaries keyed by the label to show, typically the
-            consolidation mode.
+        summaries: Run summaries keyed by the label to show — the consolidation
+            mode for the ablation, or `lexical` against `semantic` for the two
+            arms of one run.
         title: Optional chart title.
 
     Returns:
@@ -220,6 +277,62 @@ def plot_ablation(summaries: dict[str, dict], *, title: str = "") -> Figure:
     axes.set_ylabel("QA accuracy")
     axes.set_title(title or "Consolidation ablation")
     axes.legend(loc="lower right", fontsize=8)
+    axes.grid(axis="y", alpha=0.25)
+    figure.tight_layout()
+    return figure
+
+
+def plot_metric_comparison(
+    summaries: dict[str, dict],
+    *,
+    metrics: Sequence[str] = ("retrieval_correct_rate", "retrieval_recall"),
+    title: str = "",
+) -> Figure:
+    """Compare whole-run metrics across runs of the same cases.
+
+    The companion to `plot_ablation`, which takes one metric and breaks it down
+    per category: this one takes the headline numbers instead and puts a few of
+    them side by side, which is how the lexical-against-semantic comparison is
+    read. Retrieval comes first by default because it is the number that says
+    whether the index earned its cost — QA moving on its own is the model
+    answering from somewhere other than memory.
+
+    Args:
+        summaries: Run summaries keyed by the label to show.
+        metrics: Summary keys to plot, in order. Any key `comparison_table`
+            reports works; the default is the two retrieval metrics.
+        title: Optional chart title.
+
+    Returns:
+        The figure.
+
+    Raises:
+        ValueError: If no summaries or no metrics were given — an empty chart is
+            a mistake upstream, not a figure with no bars.
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    if not summaries or not metrics:
+        msg = "plot_metric_comparison needs at least one summary and one metric"
+        raise ValueError(msg)
+
+    labels = dict(_METRICS)
+    positions = np.arange(len(metrics))
+    width = 0.8 / len(summaries)
+
+    figure, axes = plt.subplots(figsize=(2.4 * max(len(metrics), 2) + 2, 4.5))
+    for offset, (name, summary) in enumerate(summaries.items()):
+        values = [summary.get(key) or 0.0 for key in metrics]
+        bars = axes.bar(positions + offset * width, values, width, label=name)
+        axes.bar_label(bars, fmt="%.2f", fontsize=8, padding=2)
+
+    axes.set_xticks(positions + width * (len(summaries) - 1) / 2)
+    axes.set_xticklabels([labels.get(key, key) for key in metrics])
+    axes.set_ylim(0, 1.15)
+    axes.set_ylabel("score")
+    axes.set_title(title or "Headline metrics")
+    axes.legend(loc="upper right", fontsize=8)
     axes.grid(axis="y", alpha=0.25)
     figure.tight_layout()
     return figure

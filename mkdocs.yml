@@ -28,6 +28,7 @@ nav:
   - Home: index.md
   - Getting started: getting-started.md
   - Memory layout: memory-layout.md
+  - Semantic search: semantic-search.md
   - Benchmark: benchmark.md
   - API reference: api.md
 

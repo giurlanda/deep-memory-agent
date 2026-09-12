@@ -104,6 +104,22 @@ uv run --group benchmark python -m dma_bench.generation.generator \
 shard routing, accumulated supersessions and repeated consolidation passes are
 actually exercised — the one thing the published datasets cannot offer.
 
+There are three shapes, and the middle one exists because the jump between the
+other two is a jump in spend, not in what is being measured:
+
+| `--config` | cases/category | evidence | distractors | span |
+| ---------- | -------------- | -------- | ----------- | ---- |
+| `small`    | 6              | 2        | 4           | 30 days |
+| `medium`   | 10             | 2        | 20          | 180 days |
+| `large`    | 12             | 3        | 45          | 240 days |
+
+`medium` keeps six months of timeline — enough that monthly sharding has several
+shards to route between — for 22 sessions per case against `large`'s 48, so it
+costs roughly half of a `large` run and still exercises routing over a long
+history. Each scale writes its own file (`operational_small.json`,
+`operational_medium.json`, `operational_large.json`) and is selected in the
+notebook with `SCALE`.
+
 `--config` fixes every dimension at once, though, and size is usually the one
 you want to move on its own — a two-case trial of the `large` timeline has no
 configuration of its own. `--cases-per-category` overrides just that number and
@@ -117,6 +133,52 @@ uv run --group benchmark python -m dma_bench.generation.generator \
 
 `generate_corpus(..., cases_per_category=2)` is the same override from Python,
 for the notebook.
+
+### Checking what came back
+
+The generating model is asked for a conversation and told the turns have to
+alternate; nothing used to check that it obliged. It does not always. A model
+that answers twice in a row, signs its turns `USER:` / `Me:` / `AI:`, collapses
+both speakers into one string, or replies with `...` returns something that
+looks well-formed and is not — and since the corpus is generated once and reused
+by every run afterwards, a session that is wrong is wrong for the life of the
+file.
+
+So every session is checked before it is kept. First structurally, which is free:
+the conversation has to start with the user and alternate, no turn may be empty
+or a placeholder, hold two speakers at once, or carry a speaker label in its text
+— a leading label is taken off rather than being grounds for rejection, since
+`ingest` renders the role itself and would otherwise print it twice. Then by a
+second model, for the two things only reading the conversation reveals: that it
+is a genuine two-party exchange rather than one side narrating both, and that the
+material the session had to carry actually came through, incidentally, as the
+prompt asked.
+
+A rejected session is rewritten, with the reason it was rejected fed back into
+the prompt, up to `--max-session-retries` times (2 by default). One that never
+holds up is dropped when it was a distractor — it was noise, and one fewer
+changes nothing — and abandons the whole case when it was evidence, because the
+question is written from the evidence and a case that lost it asks about material
+the corpus no longer carries.
+
+The validator defaults to the model that wrote the session, on the same
+provider: the question is not whether a stronger model would have written it
+better, but whether this one did what it was asked. Each of the three flags falls
+back to its primary counterpart, so judging with a stronger model behind another
+endpoint needs only the flags that actually differ:
+
+```bash
+uv run --group benchmark python -m dma_bench.generation.generator \
+    --config medium --out benchmark/data/operational_medium.json \
+    --model qwen2.5:3b --base-url http://localhost:11434/v1 \
+    --validator-model gpt-4o --validator-base-url https://api.openai.com/v1 \
+    --validator-api-key "$OPENAI_API_KEY"
+```
+
+Validation roughly doubles the calls per session and retries can triple that
+again, which the progress bars are sized for. `--no-validate` turns it off and
+keeps whatever the model returns, at the original cost;
+`generate_corpus(..., validate=False)` is the same from Python.
 
 ### Resuming, and growing a corpus
 
@@ -180,9 +242,86 @@ Configure the first cell, then run top to bottom. Output:
 <EXPERIMENT_ROOT>/result.json                 config + every case + the summary
 ```
 
-A case that already has a `result.json` is skipped, so an interrupted run resumes
-instead of paying twice. Cases run concurrently and share nothing — separate
-memory trees, separate agents, a context-local write clock.
+Cases run concurrently and share nothing — separate memory trees, separate
+agents, separate semantic indexes, a context-local write clock.
+
+Resume protects ingestion, which is where the tokens go. A case whose history has
+already been replayed keeps its memory tree, its snapshot and its stage-one
+verdict, and pays only for the answering arms it is still missing — so an
+interrupted run picks up where it stopped, and turning `SEMANTIC_SEARCH_ENABLE`
+on over a finished experiment costs one index and one question per case rather
+than the whole replay again. A case that ends in an error is looked at again on
+the next run, and so is an arm whose answering or grading failed. A replay cut
+short halfway — or one that lost a session to a dropped connection — is redone
+from an empty tree, because answering out of half a memory would score something
+that was never measured.
+
+## Timeouts and budgets
+
+Left alone, a model call has no upper bound. The HTTP timeout trips on silence,
+not on duration, so a slow generation — or a router keeping the connection alive
+while a provider queues — is never cut off; the client then retries it twice
+more, and the judge retries that twice more. A reasoning model given no token
+budget can think for minutes and hand back an empty reply. On earlier runs that
+turned a 25-second answer into a nine-minute one, and a three-minute ingestion
+into nearly forty.
+
+Three layers bound it now, all set in the notebook's first cell:
+
+| Layer | Bound | Settings |
+| --- | --- | --- |
+| One attempt | Streamed on a worker thread and abandoned — connection closed — at the deadline. A silent server trips the read timeout sooner. | `CALL_DEADLINE_S`, `IDLE_TIMEOUT_S` |
+| One call | Transient failures (timeout, connection, 429, 5xx) retried with exponential backoff; this is the only retry layer. A reply cut off at its token budget is asked again with the budget doubled, up to a cap. Reasoning is capped below the budget. | `LLM_MAX_RETRIES`, `*_MAX_TOKENS`, `*_MAX_TOKENS_CAP`, `*_REASONING_MAX_TOKENS` |
+| One invocation | A session replay or an answer is ended — not raised — once it spends its time or its model calls. | `INVOCATION_TIMEOUT_S`, `MAX_MODEL_CALLS` |
+
+`AGENT_*` and `JUDGE_*` set the two roles apart, sampling included
+(`*_TEMPERATURE`, `*_FREQUENCY_PENALTY`). The model is
+`dma_bench.llm.ResilientChatOpenAI`, a `ChatOpenAI` subclass, so anything
+`ChatOpenAI` takes still works — `extra_body` for OpenRouter's provider routing,
+for one.
+
+What the bounds cost is on record. Each `result.json` lists every model call
+under `llm_calls` — stage, seconds, attempts, tokens, finish reason, outcome —
+and the cost table aggregates them: `llm_p95_call_s` and `llm_max_call_s` show
+the tail, and `llm_retried_calls`, `llm_truncated_calls` and
+`llm_timed_out_calls` say what it was made of. An answer the budget ended has
+`stopped_by` set, and a session it ended is listed under
+`ingestion.budget_stops`. Both are graded as they stand — a stopped answer is a
+wrong answer — and neither is retried on resume, since the same work would most
+likely overrun again.
+
+## Semantic search
+
+`SEMANTIC_SEARCH_ENABLE` in the first cell turns on the second arm. The memory
+tree is indexed once, **after the last session and before the question** — the
+same place the `final` consolidation pass runs, and for the same reason. In
+production `semantic_ingest` is the manager's own tool and the index trails the
+files by however long the agent takes to call it; measuring that lag here would
+score the run on when the last write landed rather than on what the tree holds.
+
+Every question is then asked twice over that one tree: once through the shipped
+search agent, once through the same agent holding `semantic_search` as well. The
+lexical arm is not optional. A semantic number with nothing beside it says
+nothing about whether the index helped, and because both arms share the
+ingestion, the tree and the stage-one verdict, the difference between them is the
+index and nothing else.
+
+The second arm lands under `semantic` in each `result.json` and, aggregated, under
+`summary["semantic"]` — the same shape as the summary beside it, so it goes
+through the same tables, the same three-stage decomposition and the same charts.
+Section 8 of the notebook puts the two side by side. Read retrieval before QA: an
+index that helps shows up as gold turns surfaced that lexical search missed, and
+QA moving while retrieval does not is the model answering from somewhere other
+than memory.
+
+Embeddings come from their own endpoint (`EMBEDDING_*`), because the chat models
+usually do not serve them and a local server costs nothing. Each case gets its
+own `InMemoryVectorStore`: two cases sharing an index would let one answer out of
+the other's memory, and the index is derived data — it is rebuilt from the tree
+in seconds, so a resumed case gets it back without re-ingesting a session. Swap
+`_vector_store` in the models cell for a persistent store if you want the index
+to outlive the run. Semantic search needs the package's optional `semantic`
+extra: `uv sync --extra semantic --group benchmark`.
 
 ## How the clock works, and why
 
@@ -211,8 +350,12 @@ dma_bench/
 ├── clock.py         the simulated write clock
 ├── datasets/        longmemeval adapter + operational corpus loader
 ├── generation/      the operational ontology and its generator
+├── llm.py           the bounded chat model: deadline, retries, token budget
+├── calls.py         where model-call records go, stage by stage
+├── budget.py        the per-invocation time and model-call budget
 ├── agents.py        building the manager and search agents
 ├── ingest.py        replaying a history, session by session
+├── semantic.py      indexing a finished tree for the second arm
 ├── answer.py        asking the question, capturing the trace
 ├── judges/          consolidation, retrieval and QA graders
 ├── runner.py        orchestration, persistence, resume

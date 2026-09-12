@@ -5,6 +5,151 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Benchmark: every model call is recorded in its case's `result.json` under
+  `llm_calls` — stage, seconds, attempts, tokens, finish reason, outcome — and
+  summarised in the cost table (`llm_p95_call_s`, `llm_max_call_s`, and the
+  retried, truncated and timed-out counts), so a slow case can be explained from
+  disk. Cases are reported as they finish rather than in submission order.
+  ([#13])
+
+### Fixed
+
+- Benchmark: a single model call, or a single agent invocation, can no longer
+  stall a run for tens of minutes. `dma_bench.llm.ResilientChatOpenAI` streams
+  every call under a hard deadline, is the only retry layer (transient failures
+  only, with exponential backoff), asks a reply cut off at its token budget
+  again with a larger budget up to a cap, and caps reasoning tokens.
+  `InvocationBudget` ends a session replay or an answer that spends its time or
+  model-call budget. The notebook configures agent and judge separately, their
+  `temperature` and `frequency_penalty` included. ([#13])
+- Benchmark: resume re-runs an answering arm whose answering or grading failed,
+  and replays a case that lost a session from an empty tree, instead of keeping
+  a transient failure as final. The judge no longer retries transport failures
+  on top of the model layer's own retries.
+
+[#13]: https://github.com/giurlanda/deep-memory-agent/issues/13
+
+## [0.2.0] - 2026-09-01
+
+### Added
+
+- Semantic search over the memory tree: an embedding index alongside the lexical
+  one, covering all seven categories. The markdown files stay the single source
+  of truth — the index is derived data, rebuildable from `/memory/` at any time
+  and deletable without losing a fact. Enabled by passing `embeddings` and
+  `vector_store` to either agent factory; needs the new optional `semantic`
+  extra. ([#10])
+- `semantic_ingest` and `semantic_search` tools. The manager agent gets both,
+  since it is the single writer and so the only agent that can keep a derived
+  index in step; the recall agent gets only the search, because withholding the
+  ingest tool is the only way to keep it read-only over a store that
+  `READ_ONLY_MEMORY_PERMISSIONS` cannot guard.
+- `ingest_semantic_index`, the same ingest without a model in the loop, for a
+  cron entry, a pre-commit hook or a deployment step. Re-running it with nothing
+  changed leaves the vector store as it was and says so.
+- `SemanticIndex`, `SemanticConfig`, `ChunkingConfig`, `IngestReport`,
+  `SemanticTools`, `chunk_entry` and `create_semantic_tools` on the public API,
+  plus a `Semantic search` page in the docs.
+- `memory_get`, a recall tool that returns one entry in full given its id.
+  `memory_search` truncates long bodies and `memory_read` hands back every entry
+  in a file, so there was no way to open exactly the entry a hit pointed at —
+  a gap the semantic index makes routine.
+- `for_deep_agent` on `resolve_backend`, so a standalone caller can resolve a
+  `memory_dir` without landing on a `StateBackend` that only answers inside a
+  graph execution.
+- Two runnable examples for the semantic index, `examples/build_semantic_memory.py`
+  and `examples/semantic_memory.py`, against a hybrid Qdrant collection (dense +
+  BM25) with embeddings served locally over an OpenAI-compatible endpoint. The
+  second runs one question through `memory_search` and `semantic_search` side by
+  side with no model in the loop, so the gap between them is visible rather than
+  asserted.
+- An `examples` dependency group holding what those scripts need. Like
+  `benchmark`, it is outside `uv sync --all-extras`, so CI and the published
+  wheel are unaffected.
+- A semantic arm in the benchmark, behind `SEMANTIC_SEARCH_ENABLE`. The memory
+  tree is indexed once after the last session and before the question, and every
+  question is then asked twice over that one tree — once through the shipped
+  search agent, once through the same agent holding `semantic_search`. Both arms
+  share the ingestion, the tree and the stage-one verdict, so what separates
+  their numbers is the index. The second arm lands under `semantic` in each
+  `result.json` and under `summary["semantic"]` in the aggregate, in the same
+  shape as the summary beside it, so it goes through the same tables, the same
+  three-stage decomposition and the same charts.
+- `dma_bench.report.comparison_table` and `dma_bench.metrics.semantic_view`, plus
+  a section in the notebook putting the two arms side by side.
+- `dma_bench.report.plot_metric_comparison`, a headline chart putting whole-run
+  metrics side by side across arms — the companion to `plot_ablation`, which
+  breaks a single metric down per category. Section 8 of the benchmark notebook
+  now draws retrieval correct and retrieval recall for the lexical and semantic
+  arms ahead of the QA chart, since retrieval is the number that says whether
+  the index earned its cost.
+- A `medium` corpus shape for the operational generator, between `small` and
+  `large`: 10 cases per category, 2 evidence and 20 distractor sessions each,
+  spread over 180 days. The jump from `small` to `large` was a jump in spend
+  rather than in what is measured — `medium` keeps a six-month timeline, so
+  monthly sharding still has several shards to route between, at 22 sessions per
+  case against `large`'s 48. Generated with
+  `--config medium`, loaded as `SCALE = "medium"` from
+  `benchmark/data/operational_medium.json`.
+- A `medium` scale for LongMemEval too, so the choice is no longer between two
+  sessions per case and forty-eight. It loads `longmemeval_s_10.json`: the `s`
+  haystack with distractor sessions dropped at random until each question is
+  down to ten, which leaves every evidence session in place — the questions are
+  exactly as answerable as at `large`, there is just a fifth of the hay to
+  ingest. Produced by the new `benchmark/longmemeval/data/shrink_haystack.py`,
+  which streams its input, so it thins the 2.7 GB `m` file as readily as `s`.
+
+- `dma_bench.generation.validation`, and the `--no-validate`,
+  `--max-session-retries`, `--validator-model`, `--validator-base-url` and
+  `--validator-api-key` flags on the generator. A rejected session is rewritten
+  with the reason it was rejected, up to the retry budget (2 by default); one
+  that never holds up is dropped when it was a distractor and abandons the case
+  when it was evidence. The validator defaults to the writing model on the same
+  provider, each flag falling back to its primary counterpart. Validation is on
+  by default and roughly doubles the calls per session; `--no-validate` restores
+  the previous cost. ([#12])
+
+### Changed
+
+- The benchmark's resume now protects ingestion rather than whole cases. A case
+  whose history has already been replayed keeps its memory tree, its snapshot and
+  its stage-one verdict, and pays only for the answering arms it is missing — so
+  turning `SEMANTIC_SEARCH_ENABLE` on over a finished experiment costs one index
+  and one question per case instead of the whole replay. A case that ended in an
+  error is looked at again on the next run; a replay cut short halfway is redone
+  from the start.
+- `create_memory_search_agent` and `create_memory_manager_agent` take
+  `embeddings`, `vector_store`, `search_k` and `semantic_config`. All default to
+  off; without them the agents behave exactly as before. When semantic search is
+  active, the built-in prompts gain a section on it — a `system_prompt` of your
+  own still replaces the prompt whole, that section included.
+
+### Fixed
+
+- The operational generator no longer infers who spoke from a turn's position in
+  the list. Turns come back from the model with their own `role`, and
+  `has_answer` follows that role instead of the same parity — a model that
+  answered twice in a row used to have every turn after it labelled with the
+  wrong speaker, and handed the retrieval judge a gold set pointing at assistant
+  turns. Measured on the corpora already generated: 33 mislabelled turns across
+  8 sessions in a `medium` run, 159 across 46 sessions in `operational_large`.
+  The corpora on disk still carry the defect and need regenerating. ([#12])
+- Every generated session is now checked before it is kept. A structural pass
+  rejects conversations that do not alternate, do not start with the user, hold
+  two speakers in one turn, or answer with a placeholder, and takes off any
+  speaker label that leaked into the text — `ingest` renders the role itself, so
+  a turn stored as `USER: …` reached memory with the label printed twice. A
+  second model then judges what only reading the conversation reveals: whether it
+  is a genuine two-party exchange, and whether the material the session had to
+  carry actually came through. ([#12])
+
+[#10]: https://github.com/giurlanda/deep-memory-agent/issues/10
+[#12]: https://github.com/giurlanda/deep-memory-agent/issues/12
+
 ## [0.1.4] - 2026-08-31
 
 ### Added
@@ -91,7 +236,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `MemoryStore`, `build_memory_backend`, `resolve_backend` and
   `ensure_memory_tree` as the supporting public surface.
 
-[Unreleased]: https://github.com/giurlanda/deep-memory-agent/compare/v0.1.2...HEAD
+[0.2.0]: https://github.com/giurlanda/deep-memory-agent/compare/v0.1.4...v0.2.0
 [0.1.2]: https://github.com/giurlanda/deep-memory-agent/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/giurlanda/deep-memory-agent/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/giurlanda/deep-memory-agent/releases/tag/v0.1.0

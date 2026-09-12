@@ -6,10 +6,12 @@ from typing import Any
 
 import pytest
 from deepagents.backends import CompositeBackend, FilesystemBackend
+from langchain_core.embeddings import DeterministicFakeEmbedding
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import RunnableLambda
+from langchain_core.vectorstores import InMemoryVectorStore
 from pydantic import Field
 
 from deep_memory_agent.consolidation import ConsolidatedItem, ConsolidationProposal
@@ -26,12 +28,16 @@ class ScriptedChatModel(BaseChatModel):
 
     responses: list[AIMessage] = Field(default_factory=list)
     structured_response: Any = None
+    seen: list[Any] = Field(default_factory=list)
+    """Every message list the model was called with, so a test can assert on
+    the system prompt the agent actually assembled."""
 
     @property
     def _llm_type(self) -> str:
         return "scripted"
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):  # noqa: ARG002
+        self.seen.append(list(messages))
         message = self.responses.pop(0) if self.responses else AIMessage(content="done")
         return ChatResult(generations=[ChatGeneration(message=message)])
 
@@ -95,3 +101,28 @@ def consolidation_model():
         )
 
     return build
+
+
+@pytest.fixture
+def embeddings():
+    """A deterministic, offline stand-in for a real embedding model.
+
+    It hashes text rather than understanding it, so it cannot be used to assert
+    that a paraphrase retrieves its entry — only that the index writes, updates,
+    deletes and filters the right chunks, which is what these tests are about.
+    """
+    return DeterministicFakeEmbedding(size=32)
+
+
+@pytest.fixture
+def vector_store(embeddings):
+    """An in-memory vector store that upserts on a repeated id."""
+    return InMemoryVectorStore(embeddings)
+
+
+@pytest.fixture
+def semantic_index(embeddings, vector_store, store):
+    """A semantic index over the freshly scaffolded memory tree."""
+    from deep_memory_agent.semantic_index import SemanticIndex
+
+    return SemanticIndex(embeddings, vector_store, store)

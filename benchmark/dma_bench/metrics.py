@@ -22,10 +22,17 @@ memory, which is exactly the shortcut a memory benchmark has to detect.
 `supersede-integrity` is folded in as its own category here even though it has no
 cases of its own: it is the knowledge-update cases re-read under the strict
 prompt, and it belongs next to them in the table.
+
+A run that compared arms gets the same summary twice. The semantic arm is not a
+separate metric bolted on the side: it is the same eight cells and the same
+per-category table computed over the second answer, nested under `semantic`, so
+the two are read with the identical machinery and the difference between them is
+the whole point.
 """
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from typing import TYPE_CHECKING
 
@@ -34,9 +41,9 @@ from dma_bench.categories import BenchCategory
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
-    from dma_bench.schema import CaseResult
+    from dma_bench.schema import CallRecord, CaseResult
 
-__all__ = ["CELL_DIAGNOSIS", "cell_label", "decompose", "summarise"]
+__all__ = ["CELL_DIAGNOSIS", "cell_label", "decompose", "semantic_view", "summarise"]
 
 CELL_DIAGNOSIS: dict[str, str] = {
     "C✓ R✓ G✓": "working as intended",
@@ -108,15 +115,60 @@ def decompose(results: Sequence[CaseResult]) -> dict:
     }
 
 
-def summarise(results: Sequence[CaseResult]) -> dict:
-    """Aggregate a run into the numbers the report shows.
+def semantic_view(results: Sequence[CaseResult]) -> list[CaseResult]:
+    """Re-read the cases through their semantic arm.
+
+    The arm answered the same question out of the same memory, so everything
+    upstream of the answer — ingestion, the tree, the stage-one verdict — is
+    shared and copied across unchanged. Promoting the arm's reply and verdicts
+    into the fields the rest of this module reads is what lets one summariser,
+    one decomposition and one set of charts serve both arms.
 
     Args:
         results: The case results.
 
     Returns:
+        One result per case that has a semantic arm, in the same order. Cases
+        without one are dropped rather than falling back to the lexical answer,
+        which would quietly credit the index with numbers it never earned. The
+        model calls kept are the shared ones and the arm's own — the lexical
+        arm's are dropped, for the same reason.
+    """
+    view = []
+    for result in results:
+        arm = result.semantic
+        if arm is None:
+            continue
+        view.append(
+            result.model_copy(
+                update={
+                    "answer": arm.answer,
+                    "retrieval": arm.retrieval,
+                    "qa": arm.qa,
+                    "supersede_integrity": arm.supersede_integrity,
+                    "llm_calls": [
+                        call
+                        for call in result.llm_calls
+                        if not call.stage.endswith(":lexical")
+                    ],
+                }
+            )
+        )
+    return view
+
+
+def summarise(results: Sequence[CaseResult], *, arms: bool = True) -> dict:
+    """Aggregate a run into the numbers the report shows.
+
+    Args:
+        results: The case results.
+        arms: Whether to nest the semantic arm's own summary under `semantic`.
+            `False` is how that nested summary is built, and stops the recursion.
+
+    Returns:
         Overall metrics, a per-category breakdown, the three-stage
-        decomposition, and the ingestion cost.
+        decomposition, and the ingestion cost — plus, when the run compared
+        arms, the same shape again under `semantic`.
     """
     scored = [result for result in results if not result.error]
     buckets: dict[str, list[CaseResult]] = {}
@@ -128,7 +180,7 @@ def summarise(results: Sequence[CaseResult]) -> dict:
     if supersede:
         by_category[BenchCategory.SUPERSEDE_INTEGRITY.value] = _supersede_row(supersede)
 
-    return {
+    summary: dict = {
         "cases": len(results),
         "failed_cases": len(results) - len(scored),
         "qa_accuracy": _mean(result.qa.correct for result in scored),
@@ -147,6 +199,10 @@ def summarise(results: Sequence[CaseResult]) -> dict:
         "decomposition": decompose(scored),
         "cost": _cost(scored),
     }
+    semantic = semantic_view(results) if arms else []
+    if semantic:
+        summary["semantic"] = summarise(semantic, arms=False)
+    return summary
 
 
 def _category_row(results: list[CaseResult]) -> dict:
@@ -199,8 +255,14 @@ def _supersede_row(results: list[CaseResult]) -> dict:
 
 
 def _cost(results: list[CaseResult]) -> dict:
-    """Summarise what the run spent and what it left behind."""
-    return {
+    """Summarise what the run spent and what it left behind.
+
+    The index keys appear only for a run that built one, so a lexical run's cost
+    table is unchanged and a semantic one does not report seven zeros. The
+    model-call keys likewise appear only when calls were recorded.
+    """
+    indexed = [result.semantic.index for result in results if result.semantic]
+    cost = {
         "sessions_ingested": sum(result.ingestion.sessions for result in results),
         "failed_sessions": sum(
             len(result.ingestion.failed_sessions) for result in results
@@ -222,6 +284,40 @@ def _cost(results: list[CaseResult]) -> dict:
             sum(result.ingestion.duration_s for result in results), 1
         ),
         "answer_seconds": round(sum(result.answer.duration_s for result in results), 1),
+    }
+    if indexed:
+        cost["indexed_entries"] = sum(
+            record.added + record.updated for record in indexed
+        )
+        cost["indexed_chunks"] = sum(record.chunks for record in indexed)
+        cost["failed_indexes"] = sum(record.error is not None for record in indexed)
+        cost["indexing_seconds"] = round(
+            sum(record.duration_s for record in indexed), 1
+        )
+    calls = [call for result in results for call in result.llm_calls]
+    if calls:
+        cost.update(_call_cost(calls))
+    return cost
+
+
+def _call_cost(calls: list[CallRecord]) -> dict:
+    """Summarise the model calls: where the time went, and how calls ended.
+
+    The tail is the point. A mean hides the one call in fifty that ran for ten
+    minutes; the 95th percentile and the maximum show it, and the outcome counts
+    say whether it was a timeout, a truncation, or retries adding up.
+    """
+    seconds = sorted(call.seconds for call in calls)
+    nearest_rank = max(math.ceil(0.95 * len(seconds)) - 1, 0)
+    return {
+        "llm_calls": len(calls),
+        "llm_seconds": round(sum(seconds), 1),
+        "llm_p95_call_s": seconds[nearest_rank],
+        "llm_max_call_s": seconds[-1],
+        "llm_retried_calls": sum(call.attempts > 1 for call in calls),
+        "llm_truncated_calls": sum(call.outcome == "truncated" for call in calls),
+        "llm_timed_out_calls": sum(call.outcome == "timeout" for call in calls),
+        "llm_failed_calls": sum(call.outcome == "error" for call in calls),
     }
 
 

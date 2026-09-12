@@ -14,4 +14,6 @@ benchmark/longmemeval/data/
 benchmark/longmemeval/*.pdf
 benchmark/runs/
 examples/local*
+# Memory trees produced by the examples
+examples/semantic-memory/
 launch.json

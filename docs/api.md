@@ -16,6 +16,18 @@
 
 ::: deep_memory_agent.consolidation
 
+## Semantic tools
+
+::: deep_memory_agent.semantic_tools
+
+## Semantic index
+
+::: deep_memory_agent.semantic_index
+
+## Semantic chunking
+
+::: deep_memory_agent.semantic_chunking
+
 ## Backends
 
 ::: deep_memory_agent.backends

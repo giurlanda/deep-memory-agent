@@ -15,7 +15,9 @@ LongMemEval's sessions are packed into about ten days, so monthly sharding never
 has more than a shard or two to route between. The `large` configuration spreads
 its sessions across roughly eight months, which is where shard routing,
 accumulated supersessions and repeated consolidation passes actually get
-exercised.
+exercised. The `medium` configuration keeps six months of that timeline for
+under half the sessions per case: the cheapest shape that still has several
+shards to route between.
 
 Run it once and keep the output:
 
@@ -34,6 +36,27 @@ put them:
 uv run --group benchmark python -m dma_bench.generation.generator \\
     --config large --cases-per-category 2 --out benchmark/data/trial.json
 ```
+
+Every session is checked before it is kept, because the corpus is generated once
+and reused by every run afterwards: a session that is wrong is wrong for the life
+of the file. The structural pass in `validation` runs first and costs nothing,
+then a second model judges what only reading the conversation reveals — see that
+module for what each looks for. A rejected session is rewritten with the reason
+it was rejected, up to `--max-session-retries` times; one that never holds up is
+dropped when it was a distractor and abandons the case when it was evidence.
+
+The validator defaults to the model that wrote the session, on the same provider,
+and each of its flags falls back to the primary one:
+
+```bash
+uv run --group benchmark python -m dma_bench.generation.generator \
+    --config small --out benchmark/data/operational_small.json \
+    --model qwen2.5:3b --base-url http://localhost:11434/v1 \
+    --validator-model gpt-4o --validator-base-url https://api.openai.com/v1
+```
+
+`--no-validate` keeps whatever the model returns, at the calls the run used to
+cost.
 
 Generation is slow and paid for by the call, so no case is ever generated
 twice: each one is written to `--out` as soon as it is finished, and a run
@@ -59,7 +82,7 @@ import sys
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from pydantic import BaseModel, Field
 
@@ -73,10 +96,17 @@ from dma_bench.generation.ontology import (
     PROJECT_EVENTS,
     STACKS,
 )
+from dma_bench.generation.validation import (
+    GeneratedSession,
+    GeneratedTurn,
+    strip_speaker_label,
+    structural_problem,
+    validate_session,
+)
 from dma_bench.schema import Case, Session, Turn
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Iterator
 
     from langchain_core.language_models import BaseChatModel
 
@@ -86,6 +116,7 @@ __all__ = [
     "calls_per_category",
     "generate_corpus",
     "load_corpus",
+    "session_budget",
     "write_corpus",
 ]
 
@@ -117,6 +148,12 @@ CORPUS_SHAPES: dict[str, CorpusShape] = {
         distractor_sessions=4,
         span_days=30,
     ),
+    "medium": CorpusShape(
+        cases_per_category=10,
+        evidence_sessions=2,
+        distractor_sessions=10,
+        span_days=180,
+    ),
     "large": CorpusShape(
         cases_per_category=12,
         evidence_sessions=3,
@@ -124,7 +161,13 @@ CORPUS_SHAPES: dict[str, CorpusShape] = {
         span_days=240,
     ),
 }
-"""The two fixed shapes, mirroring the `small` and `large` LongMemEval scales."""
+"""The three fixed shapes.
+
+`small` and `large` mirror the LongMemEval scales. `medium` sits between them:
+six months of timeline, so monthly sharding still has several shards to route
+between, at less than half of `large`'s sessions per case — which is where the
+cost is.
+"""
 
 _SESSION_PROMPT = """\
 Write one working conversation between a user and their AI assistant, as it
@@ -135,6 +178,7 @@ Context to work from:
 
 Rules:
 - {turns} turns in total, alternating user and assistant, starting with the user.
+  Every turn carries its own role; never write the speaker's name into the text.
 - The information listed under "must come through" has to be present, but
   mentioned **in passing, as part of doing the work** — never announced as a
   fact. Someone reading the conversation should be able to infer it; nobody
@@ -146,6 +190,11 @@ Rules:
 
 Must come through:
 {payload}
+"""
+
+_RETRY_NOTE = """\
+An earlier attempt at this conversation was rejected: {problem}
+Write it again, without that problem.
 """
 
 _QUESTION_PROMPT = """\
@@ -178,15 +227,6 @@ _INTENTS: dict[BenchCategory, str] = {
 }
 
 
-class _GeneratedSession(BaseModel):
-    """A conversation as the generating model returns it."""
-
-    turns: list[str] = Field(
-        default_factory=list,
-        description="Turns in order, alternating, starting with the user.",
-    )
-
-
 class _GeneratedQuestion(BaseModel):
     """A question and its reference answer."""
 
@@ -200,6 +240,9 @@ def generate_corpus(
     *,
     categories: list[BenchCategory] | None = None,
     cases_per_category: int | None = None,
+    validate: bool = True,
+    validator: BaseChatModel | None = None,
+    max_session_retries: int = 2,
     seed: int = 0,
     end_date: datetime | None = None,
     progress: bool = True,
@@ -217,6 +260,20 @@ def generate_corpus(
             Nothing else moves — sessions per case and the timeline span stay as
             the configuration set them — so a trial run and a full one differ
             only in how many cases they pay for.
+        validate: Judge every generated session before keeping it —
+            structurally, and on whether the material it had to carry actually
+            came through. On by default: the corpus is generated once and reused
+            for every run afterwards, so a session that is wrong is wrong for the
+            life of the file. Turning it off restores the older behaviour of
+            keeping whatever the model returned, at half the calls.
+        validator: The model that does the judging. Defaults to `model` — the
+            question is not whether a stronger model would have written the
+            session better, but whether this one did what it was asked. Ignored
+            when `validate` is false.
+        max_session_retries: How many times a rejected session is rewritten, with
+            the reason it was rejected fed back into the prompt. A session that
+            never holds up is dropped when it was a distractor and abandons the
+            case when it was evidence.
         seed: Makes the sampling of entities reproducible. Each case draws
             from its own stream, keyed by the seed together with the category
             and the index of the case, so a case gets the same client and the
@@ -249,6 +306,7 @@ def generate_corpus(
             `out` exists and is not a corpus.
     """
     shape = _override_cases(shape, cases_per_category)
+    judge = (validator or model) if validate else None
     wanted = categories or [
         BenchCategory.PROCEDURAL_RETRIEVAL,
         BenchCategory.NON_REPETITION,
@@ -262,8 +320,13 @@ def generate_corpus(
         if missing < 1:
             continue
         first = _next_index(cases, category)
+        budget = session_budget(
+            validate=judge is not None, max_retries=max_session_retries
+        )
         with _progress(
-            category.value, calls_per_category(shape, cases=missing), enabled=progress
+            category.value,
+            calls_per_category(shape, cases=missing, budget=budget),
+            enabled=progress,
         ) as advance:
             for index in range(first, first + missing):
                 case = _generate_case(
@@ -273,6 +336,8 @@ def generate_corpus(
                     random.Random(f"{seed}:{category.value}:{index}"),
                     asked_on,
                     f"{category.value}-{index:02d}",
+                    validator=judge,
+                    max_session_retries=max_session_retries,
                     advance=advance,
                 )
                 if case is None:
@@ -283,23 +348,47 @@ def generate_corpus(
     return cases
 
 
-def calls_per_category(shape: CorpusShape, *, cases: int | None = None) -> int:
-    """Return how many model calls one category of this shape will make.
+def session_budget(*, validate: bool = False, max_retries: int = 0) -> int:
+    """Return the most model calls one session can cost.
 
-    One call per session, plus one per case for the question. A failed call is
-    still a call, so this is the exact total rather than an upper bound — which
-    is what lets every bar actually reach the end.
+    A session is written once and, when it is validated, judged once; a rejected
+    one is written and judged again, up to the retry budget. The worst case is
+    what the bars are sized from, so a run that has to retry never overruns its
+    total.
+
+    Args:
+        validate: Whether each session is judged by a second model.
+        max_retries: How many times a rejected session is rewritten.
+
+    Returns:
+        The number of model calls.
+    """
+    return (1 + max_retries) * (2 if validate else 1)
+
+
+def calls_per_category(
+    shape: CorpusShape, *, cases: int | None = None, budget: int = 1
+) -> int:
+    """Return how many model calls one category of this shape can make.
+
+    One call per session — or, once validation and retries are in play, up to
+    `budget` of them — plus one per case for the question. A failed call is still
+    a call, and a session that settles under budget has the rest of its budget
+    stepped through in one go, so this stays the exact total the bar reaches
+    rather than a ceiling it stops short of.
 
     Args:
         shape: The corpus shape.
         cases: How many cases the count is for. Defaults to a full category;
             a resumed run passes the number it still has to generate, so the
             bar is sized for the work left rather than for the whole corpus.
+        budget: The worst-case calls one session can cost, from
+            `session_budget`. Defaults to one, the unvalidated single attempt.
 
     Returns:
         The number of model calls.
     """
-    per_case = shape.evidence_sessions + shape.distractor_sessions + 1
+    per_case = (shape.evidence_sessions + shape.distractor_sessions) * budget + 1
     return (shape.cases_per_category if cases is None else cases) * per_case
 
 
@@ -318,10 +407,15 @@ def _override_cases(shape: CorpusShape, cases_per_category: int | None) -> Corpu
     return shape.model_copy(update={"cases_per_category": cases_per_category})
 
 
+class _Advance(Protocol):
+    """Moves one category's progress bar along."""
+
+    def __call__(self, detail: str, steps: int = 1) -> None:
+        """Advance the bar by `steps`, labelling it with `detail`."""
+
+
 @contextmanager
-def _progress(
-    label: str, total: int, *, enabled: bool
-) -> Iterator[Callable[[str], None]]:
+def _progress(label: str, total: int, *, enabled: bool) -> Iterator[_Advance]:
     """Yield a callable that advances one category's progress bar.
 
     One bar per category, left on screen when it finishes, so a run ends with a
@@ -335,16 +429,16 @@ def _progress(
     import this module have to keep working without it.
     """
     if not enabled:
-        yield lambda _label: None
+        yield lambda _detail, _steps=1: None
         return
 
     from tqdm.auto import tqdm
 
     with tqdm(total=total, unit="call", desc=label, file=sys.stdout) as bar:
 
-        def advance(detail: str) -> None:
+        def advance(detail: str, steps: int = 1) -> None:
             bar.set_postfix_str(detail, refresh=False)
-            bar.update(1)
+            bar.update(steps)
 
         yield advance
 
@@ -423,12 +517,20 @@ def _generate_case(
     asked_on: datetime,
     case_id: str,
     *,
-    advance: Callable[[str], None],
+    validator: BaseChatModel | None,
+    max_session_retries: int,
+    advance: _Advance,
 ) -> Case | None:
     """Generate one case, or `None` when the model failed to produce one.
 
-    `advance` is called once per model call on every path, including the ones
-    that give up, so the bar always reaches its total.
+    `advance` is stepped through the whole per-session budget on every path,
+    including the ones that give up, so the bar always reaches its total.
+
+    A distractor session that never held up is dropped: it was noise, and one
+    fewer changes nothing. An evidence session that never held up abandons the
+    case. The question is written from the evidence, so a case built on the
+    evidence that survived asks about material the corpus may no longer carry —
+    which is worse than not having the case at all.
     """
     client = rng.choice(CLIENTS)
     subject = (
@@ -441,6 +543,9 @@ def _generate_case(
         rng.sample(dates, k=min(shape.evidence_sessions, len(dates)))
     )
 
+    budget = session_budget(
+        validate=validator is not None, max_retries=max_session_retries
+    )
     sessions: list[Session] = []
     for index, date in enumerate(dates):
         is_evidence = date in evidence_dates
@@ -449,22 +554,35 @@ def _generate_case(
             if is_evidence
             else _distractor_material(rng)
         )
-        turns = _write_session(model, date, context, payload, rng)
-        advance(f"{case_id} s{index:02d}")
+        session_id = f"{case_id}-s{index:02d}"
+        turns = _write_session(
+            model,
+            validator,
+            date,
+            context,
+            payload,
+            rng,
+            max_retries=max_session_retries,
+            advance=advance,
+            detail=session_id,
+        )
         if turns is None:
+            if is_evidence:
+                advance(f"{case_id} abandoned", _remaining(shape, index, budget))
+                return None
             continue
         sessions.append(
             Session(
-                session_id=f"{case_id}-s{index:02d}",
+                session_id=session_id,
                 date=date,
                 turns=[
                     Turn(
-                        turn_id=f"{case_id}-s{index:02d}#{position}",
-                        role="user" if position % 2 == 0 else "assistant",
-                        content=text,
-                        has_answer=is_evidence and position % 2 == 0,
+                        turn_id=f"{session_id}#{position}",
+                        role=turn.role,
+                        content=turn.content,
+                        has_answer=is_evidence and turn.role == "user",
                     )
-                    for position, text in enumerate(turns)
+                    for position, turn in enumerate(turns)
                 ],
                 is_evidence=is_evidence,
             )
@@ -502,6 +620,16 @@ def _generate_case(
             subject["correction"] if category is BenchCategory.NON_REPETITION else None
         ),
     )
+
+
+def _remaining(shape: CorpusShape, index: int, budget: int) -> int:
+    """Return the calls a case abandoned after session `index` will never make.
+
+    The sessions after this one, at their full budget, plus the question. Stepped
+    through in one go so the bar still lands on the total it was sized from.
+    """
+    left = shape.evidence_sessions + shape.distractor_sessions - index - 1
+    return left * budget + 1
 
 
 def _timeline(
@@ -562,25 +690,82 @@ def _distractor_material(rng: random.Random) -> tuple[str, str]:
 
 def _write_session(
     model: BaseChatModel,
+    validator: BaseChatModel | None,
     date: datetime,
     context: str,
     payload: str,
     rng: random.Random,
-) -> list[str] | None:
-    """Ask the model for one conversation, or `None` if it failed."""
+    *,
+    max_retries: int,
+    advance: _Advance,
+    detail: str,
+) -> list[GeneratedTurn] | None:
+    """Write one conversation and check it, or return `None` if it never held up.
+
+    Each attempt is written, stripped of any speaker labels that leaked into the
+    text, checked structurally, and — when a validator was given — judged by it.
+    The reason an attempt was rejected goes into the next prompt, so a retry is
+    told what to fix instead of resampling blind.
+
+    `advance` is stepped once per model call, then once more at the end for
+    whatever the session did not spend, so the bar lands on the budget it was
+    sized from however many attempts this took.
+
+    Args:
+        model: The model that writes the conversation.
+        validator: The model that judges it, or `None` to skip validation.
+        date: The day the session happens on.
+        context: The account and the situation.
+        payload: What the conversation has to carry.
+        rng: Draws the turn count.
+        max_retries: How many times a rejected session is rewritten.
+        advance: Moves the progress bar.
+        detail: What to label the bar with.
+
+    Returns:
+        The turns, or `None` when every attempt was rejected or failed.
+    """
+    budget = session_budget(validate=validator is not None, max_retries=max_retries)
     prompt = _SESSION_PROMPT.format(
         date=f"{date:%Y-%m-%d}",
         context=context,
         payload=payload,
         turns=rng.choice((6, 8, 10)),
     )
-    try:
-        generated = model.with_structured_output(_GeneratedSession).invoke(prompt)
-    except Exception as exc:
-        print(f"  session generation failed: {exc!r}", file=sys.stderr)
-        return None
-    turns = getattr(generated, "turns", None) or []
-    return [turn for turn in turns if turn.strip()] or None
+    spent = 0
+    problem: str | None = None
+    turns: list[GeneratedTurn] | None = None
+
+    for _ in range(1 + max_retries):
+        attempt = prompt
+        if problem is not None:
+            attempt = f"{prompt}\n{_RETRY_NOTE.format(problem=problem)}"
+        try:
+            generated = model.with_structured_output(GeneratedSession).invoke(attempt)
+        except Exception as exc:
+            print(f"  session generation failed: {exc!r}", file=sys.stderr)
+            spent += 1
+            advance(detail)
+            break
+        spent += 1
+        advance(detail)
+
+        turns = [
+            GeneratedTurn(role=turn.role, content=strip_speaker_label(turn.content))
+            for turn in getattr(generated, "turns", None) or []
+        ]
+        problem = structural_problem(turns)
+        if problem is None and validator is not None:
+            problem = validate_session(validator, turns, payload)
+            spent += 1
+            advance(detail)
+        if problem is None:
+            break
+        print(f"  {detail} rejected: {problem}", file=sys.stderr)
+        turns = None
+
+    advance(detail, budget - spent)
+    return turns
 
 
 def _write_question(
@@ -614,6 +799,19 @@ def _positive_int(text: str) -> int:
     return value
 
 
+def _non_negative_int(text: str) -> int:
+    """Parse a retry budget from the command line, rejecting negatives.
+
+    Zero is meaningful here and positive is not the floor: it asks for one
+    attempt per session, validated but never rewritten.
+    """
+    value = int(text)
+    if value < 0:
+        msg = f"expected a non-negative integer, got {value}"
+        raise argparse.ArgumentTypeError(msg)
+    return value
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the command-line parser."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -633,6 +831,33 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default="gpt-4o-mini")
     parser.add_argument("--base-url", default=None)
     parser.add_argument("--api-key", default="not-needed")
+    parser.add_argument(
+        "--no-validate",
+        dest="validate",
+        action="store_false",
+        help="keep every session the model returns, without judging it",
+    )
+    parser.add_argument(
+        "--max-session-retries",
+        type=_non_negative_int,
+        default=2,
+        help="how many times a rejected session is rewritten before it is dropped",
+    )
+    parser.add_argument(
+        "--validator-model",
+        default=None,
+        help="model that judges each session; defaults to --model",
+    )
+    parser.add_argument(
+        "--validator-base-url",
+        default=None,
+        help="provider for the validator; defaults to --base-url",
+    )
+    parser.add_argument(
+        "--validator-api-key",
+        default=None,
+        help="api key for the validator; defaults to --api-key",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--quiet",
@@ -640,6 +865,44 @@ def _build_parser() -> argparse.ArgumentParser:
         help="suppress the progress bar, for non-interactive runs",
     )
     return parser
+
+
+_CALL_LIMITS = {
+    # A session is a few thousand tokens of structured output. These are generous
+    # for that, and still stop a generation that has lost its way.
+    "call_deadline_s": 600.0,
+    "max_output_tokens": 16384,
+    "max_output_tokens_cap": 32768,
+}
+"""The per-call bounds `dma_bench.llm` enforces on the generator's models."""
+
+
+def _build_validator(
+    args: argparse.Namespace, factory: type[BaseChatModel]
+) -> BaseChatModel:
+    """Build the validating model from the arguments, falling back to the writer's.
+
+    Each of the three validator arguments defaults to the corresponding one of
+    the primary model, so judging with the same model on the same endpoint — the
+    common case — needs no flags at all, and judging with a stronger model behind
+    a different endpoint needs only the flags that actually differ.
+
+    Args:
+        args: The parsed command line.
+        factory: The chat-model class to build with.
+
+    Returns:
+        The validating model. Temperature is zero: this is a judgement, and the
+        same conversation should not be accepted on one run and rejected on the
+        next.
+    """
+    return factory(
+        model=args.validator_model or args.model,
+        base_url=args.validator_base_url or args.base_url,
+        api_key=args.validator_api_key or args.api_key,
+        temperature=0,
+        **_CALL_LIMITS,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -651,17 +914,17 @@ def main(argv: list[str] | None = None) -> int:
     Returns:
         Process exit code.
     """
-    from langchain_openai import ChatOpenAI
+    from dma_bench.llm import ResilientChatOpenAI
 
     args = _build_parser().parse_args(argv)
-    model = ChatOpenAI(
+    model = ResilientChatOpenAI(
         model=args.model,
         base_url=args.base_url,
         api_key=args.api_key,
         temperature=0.7,
-        timeout=240,
-        max_retries=2,
+        **_CALL_LIMITS,
     )
+    validator = _build_validator(args, ResilientChatOpenAI) if args.validate else None
     shape = CORPUS_SHAPES[args.config]
     per_category = args.cases_per_category or shape.cases_per_category
     if args.out.exists():
@@ -674,6 +937,9 @@ def main(argv: list[str] | None = None) -> int:
         model,
         shape,
         cases_per_category=args.cases_per_category,
+        validate=args.validate,
+        validator=validator,
+        max_session_retries=args.max_session_retries,
         seed=args.seed,
         progress=not args.quiet,
         out=args.out,

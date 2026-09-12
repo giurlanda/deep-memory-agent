@@ -92,6 +92,8 @@ def test_a_missing_corpus_says_how_to_generate_it(tmp_path):
 
 def test_scales_map_to_corpus_files(tmp_path):
     assert corpus_path(tmp_path, "small").name == "operational_small.json"
+    assert corpus_path(tmp_path, "medium").name == "operational_medium.json"
+    assert corpus_path(tmp_path, "large").name == "operational_large.json"
     with pytest.raises(ValueError, match="unknown operational scale"):
         corpus_path(tmp_path, "xl")
 

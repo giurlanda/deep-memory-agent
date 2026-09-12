@@ -21,6 +21,10 @@ in opposite directions:
 | [`create_memory_search_agent`][deep_memory_agent.create_memory_search_agent] | No, denied at the backend | Answering from memory |
 | [`create_memory_manager_agent`][deep_memory_agent.create_memory_manager_agent] | Yes, and it is the only writer | Recording, superseding, consolidating |
 
+Both agents can also be given an embedding model and a vector store, which adds
+an index that finds an entry whose wording does not match the question — see
+[Semantic search](semantic-search.md).
+
 Start with [Getting started](getting-started.md), read
 [Memory layout](memory-layout.md) for the file format and the rules that govern
 it, or jump to the [API reference](api.md).

@@ -13,7 +13,7 @@ def tools_by_name(tools):
 def test_recall_tools_are_read_only(store):
     names = set(tools_by_name(build_recall_tools(store)))
 
-    assert names == {"memory_index", "memory_search", "memory_read"}
+    assert names == {"memory_index", "memory_search", "memory_get", "memory_read"}
 
 
 def test_write_tools_need_a_model_for_consolidation(store):
@@ -150,6 +150,55 @@ def test_memory_index_rejects_an_unknown_kind(store):
     index = tools_by_name(build_recall_tools(store))["memory_index"]
 
     assert index.invoke({"kind": "nonsense"}).startswith("Error:")
+
+
+def test_memory_get_returns_one_entry_in_full(store):
+    hit = store.write(
+        MemoryCategory.FACTS,
+        "word " * 400,
+        summary="A long fact",
+        tags=("acme",),
+    )
+    get = tools_by_name(build_recall_tools(store))["memory_get"]
+
+    result = get.invoke({"entry_id": hit.entry.entry_id})
+
+    assert hit.entry.entry_id in result
+    assert hit.path in result
+    assert "A long fact" in result
+    # `memory_search` truncates at 800 characters; reading an entry whole is
+    # exactly what this tool exists for.
+    assert "…" not in result
+    assert result.count("word") == 400
+
+
+def test_memory_get_finds_an_entry_a_shared_file_holds(store):
+    store.write(MemoryCategory.FACTS, "First.", summary="First")
+    second = store.write(MemoryCategory.FACTS, "Second.", summary="Second")
+    get = tools_by_name(build_recall_tools(store))["memory_get"]
+
+    result = get.invoke({"entry_id": second.entry.entry_id})
+
+    assert "Second." in result
+    assert "First." not in result
+
+
+def test_memory_get_reaches_a_superseded_entry(store):
+    old = store.write(MemoryCategory.FACTS, "ACME is on Team.", when=AUGUST)
+    store.write(
+        MemoryCategory.FACTS, "ACME is on Enterprise.", supersedes=old.entry.entry_id
+    )
+    get = tools_by_name(build_recall_tools(store))["memory_get"]
+
+    result = get.invoke({"entry_id": old.entry.entry_id})
+
+    assert "SUPERSEDED BY" in result
+
+
+def test_memory_get_reports_an_unknown_id(store):
+    get = tools_by_name(build_recall_tools(store))["memory_get"]
+
+    assert get.invoke({"entry_id": "mem_1970-01-01_000000"}).startswith("Error:")
 
 
 def test_memory_read_refuses_paths_outside_the_tree(store):
