@@ -32,6 +32,7 @@ the whole point.
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from typing import TYPE_CHECKING
 
@@ -40,7 +41,7 @@ from dma_bench.categories import BenchCategory
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
-    from dma_bench.schema import CaseResult
+    from dma_bench.schema import CallRecord, CaseResult
 
 __all__ = ["CELL_DIAGNOSIS", "cell_label", "decompose", "semantic_view", "summarise"]
 
@@ -129,7 +130,9 @@ def semantic_view(results: Sequence[CaseResult]) -> list[CaseResult]:
     Returns:
         One result per case that has a semantic arm, in the same order. Cases
         without one are dropped rather than falling back to the lexical answer,
-        which would quietly credit the index with numbers it never earned.
+        which would quietly credit the index with numbers it never earned. The
+        model calls kept are the shared ones and the arm's own — the lexical
+        arm's are dropped, for the same reason.
     """
     view = []
     for result in results:
@@ -143,6 +146,11 @@ def semantic_view(results: Sequence[CaseResult]) -> list[CaseResult]:
                     "retrieval": arm.retrieval,
                     "qa": arm.qa,
                     "supersede_integrity": arm.supersede_integrity,
+                    "llm_calls": [
+                        call
+                        for call in result.llm_calls
+                        if not call.stage.endswith(":lexical")
+                    ],
                 }
             )
         )
@@ -250,7 +258,8 @@ def _cost(results: list[CaseResult]) -> dict:
     """Summarise what the run spent and what it left behind.
 
     The index keys appear only for a run that built one, so a lexical run's cost
-    table is unchanged and a semantic one does not report seven zeros.
+    table is unchanged and a semantic one does not report seven zeros. The
+    model-call keys likewise appear only when calls were recorded.
     """
     indexed = [result.semantic.index for result in results if result.semantic]
     cost = {
@@ -285,7 +294,31 @@ def _cost(results: list[CaseResult]) -> dict:
         cost["indexing_seconds"] = round(
             sum(record.duration_s for record in indexed), 1
         )
+    calls = [call for result in results for call in result.llm_calls]
+    if calls:
+        cost.update(_call_cost(calls))
     return cost
+
+
+def _call_cost(calls: list[CallRecord]) -> dict:
+    """Summarise the model calls: where the time went, and how calls ended.
+
+    The tail is the point. A mean hides the one call in fifty that ran for ten
+    minutes; the 95th percentile and the maximum show it, and the outcome counts
+    say whether it was a timeout, a truncation, or retries adding up.
+    """
+    seconds = sorted(call.seconds for call in calls)
+    nearest_rank = max(math.ceil(0.95 * len(seconds)) - 1, 0)
+    return {
+        "llm_calls": len(calls),
+        "llm_seconds": round(sum(seconds), 1),
+        "llm_p95_call_s": seconds[nearest_rank],
+        "llm_max_call_s": seconds[-1],
+        "llm_retried_calls": sum(call.attempts > 1 for call in calls),
+        "llm_truncated_calls": sum(call.outcome == "truncated" for call in calls),
+        "llm_timed_out_calls": sum(call.outcome == "timeout" for call in calls),
+        "llm_failed_calls": sum(call.outcome == "error" for call in calls),
+    }
 
 
 def _mean(values: Iterable[float | bool]) -> float | None:

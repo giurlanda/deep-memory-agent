@@ -4,6 +4,11 @@ One helper, because all three judges do the same thing: send a system prompt and
 a payload, ask for a typed answer, and turn a model failure into a recorded
 `error` rather than an exception that takes the run down. A judge that crashes
 mid-run would otherwise cost every case already graded behind it.
+
+Only a reply that could not be read as a verdict is asked for again. A transport
+failure — a timeout, a dropped connection, a 429 — is the model layer's to
+retry, and `dma_bench.llm` already has by the time it surfaces here; retrying it
+again would multiply the worst case rather than improve the odds.
 """
 
 from __future__ import annotations
@@ -43,7 +48,8 @@ def ask_judge[SchemaT: BaseModel](
         The verdict.
 
     Raises:
-        JudgeError: If the model failed on every attempt.
+        JudgeError: If the model failed outright, or replied with something
+            that was not a verdict on every attempt.
     """
     grader = model.with_structured_output(schema)
     last: Exception | None = None
@@ -52,12 +58,18 @@ def ask_judge[SchemaT: BaseModel](
             verdict = grader.invoke(
                 [SystemMessage(content=system), HumanMessage(content=payload)]
             )
-        except Exception as exc:
+            return (
+                verdict
+                if isinstance(verdict, schema)
+                else schema.model_validate(verdict)
+            )
+        except ValueError as exc:
+            # Parser and validation failures are ValueErrors: a reply that did
+            # not fit the schema, which a second sample may well fix.
             last = exc
-            continue
-        if isinstance(verdict, schema):
-            return verdict
-        return schema.model_validate(verdict)
+        except Exception as exc:
+            msg = f"judge failed: {exc!r}"
+            raise JudgeError(msg) from exc
     msg = f"judge failed after {_ATTEMPTS} attempts: {last!r}"
     raise JudgeError(msg)
 

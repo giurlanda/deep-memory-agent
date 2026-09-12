@@ -1,5 +1,7 @@
 import pytest
 from langchain_core.messages import AIMessage
+from langchain_core.runnables import RunnableLambda
+from pydantic import BaseModel
 
 from deep_memory_agent.layout import MemoryCategory
 from dma_bench.categories import BenchCategory
@@ -29,6 +31,48 @@ def audit(ids=(), *, superseded=False):
             "reasoning": "checked",
         }
     }
+
+
+class Verdict(BaseModel):
+    correct: bool
+
+
+class Grader:
+    """A judge model replaying one reply — or one exception — per request."""
+
+    def __init__(self, *replies):
+        self.replies = list(replies)
+        self.asked = 0
+
+    def with_structured_output(self, schema):  # noqa: ARG002
+        def answer(_):
+            self.asked += 1
+            reply = self.replies.pop(0)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+        return RunnableLambda(answer)
+
+
+def test_a_transport_failure_is_not_asked_again():
+    grader = Grader(ConnectionError("provider down"), {"correct": True})
+
+    with pytest.raises(JudgeError, match="provider down"):
+        ask_judge(grader, Verdict, "system", "payload")
+
+    assert grader.asked == 1
+
+
+def test_a_reply_that_is_not_a_verdict_is_asked_again():
+    grader = Grader(ValueError("not json"), {"verdict": "yes"}, {"correct": True})
+
+    with pytest.raises(JudgeError, match="2 attempts"):
+        ask_judge(grader, Verdict, "system", "payload")
+    assert grader.asked == 2
+
+    retried = Grader(ValueError("not json"), {"correct": True})
+    assert ask_judge(retried, Verdict, "system", "payload").correct is True
 
 
 def test_every_category_has_a_grading_prompt():

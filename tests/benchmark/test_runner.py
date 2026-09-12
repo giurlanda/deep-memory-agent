@@ -1,5 +1,7 @@
 import json
+import threading
 
+import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
 from dma_bench.answer import (
@@ -8,6 +10,7 @@ from dma_bench.answer import (
     answer_case,
     extract_trace,
 )
+from dma_bench.calls import record_call
 from dma_bench.categories import BenchCategory
 from dma_bench.ingest import INGESTION_PROMPT, render_session
 from dma_bench.runner import (
@@ -20,7 +23,7 @@ from dma_bench.runner import (
     run_case,
     run_experiment,
 )
-from dma_bench.schema import RunConfig
+from dma_bench.schema import CallRecord, CaseResult, RunConfig
 
 FAILURE = "no service"
 
@@ -432,8 +435,6 @@ def test_a_store_that_will_not_open_costs_the_semantic_arm_only(
 def test_a_run_asking_for_an_index_it_cannot_build_is_refused(
     case, fake_model, tmp_path
 ):
-    import pytest
-
     with pytest.raises(ValueError, match="semantic_search"):
         run_experiment(
             [case],
@@ -450,3 +451,122 @@ def test_the_estimate_doubles_the_answering_side_for_a_second_arm(case, tmp_path
     assert both["judge_invocations"] == 2 * lexical["judge_invocations"]
     assert both["ingestion_invocations"] == lexical["ingestion_invocations"]
     assert both["semantic_index_passes"] == 1
+
+
+def edit_result(settings, case, change):
+    path = case_directory(settings, case) / "result.json"
+    written = json.loads(path.read_text())
+    change(written)
+    path.write_text(json.dumps(written))
+
+
+@pytest.mark.parametrize("stage", ["answer", "retrieval", "qa"])
+def test_an_arm_that_failed_is_run_again_on_resume(case, fake_model, tmp_path, stage):
+    settings = config(tmp_path)
+    run_case(case, settings, runtime(fake_model, structured=graded()))
+    edit_result(
+        settings,
+        case,
+        lambda written: written[stage].update(error="OpenAIConnectionError()"),
+    )
+    assert iter_pending([case], settings) == [case]
+
+    rerun = run_case(case, settings, runtime(fake_model, structured=graded(qa=False)))
+
+    assert getattr(rerun, stage).error is None
+    assert rerun.qa.correct is False
+    assert iter_pending([case], settings) == []
+
+
+def test_a_replay_that_lost_a_session_is_redone_from_an_empty_tree(
+    case, fake_model, tmp_path
+):
+    settings = config(tmp_path)
+    run_case(case, settings, runtime(fake_model, structured=graded()))
+
+    def lose_a_session(written):
+        written["ingestion"]["sessions"] = 1
+        written["ingestion"]["failed_sessions"] = ["s1: OpenAIConnectionError()"]
+
+    edit_result(settings, case, lose_a_session)
+    stale = case_directory(settings, case) / "memory" / "stale.md"
+    stale.write_text("left behind by the attempt that failed")
+    assert iter_pending([case], settings) == [case]
+
+    rerun = run_case(case, settings, runtime(fake_model, structured=graded()))
+
+    assert rerun.ingestion.sessions == 2
+    assert rerun.ingestion.failed_sessions == []
+    assert not stale.exists()
+
+
+def test_a_spent_invocation_budget_stops_each_invocation_and_is_recorded(
+    case, fake_model, tmp_path
+):
+    result = run_case(
+        case,
+        config(tmp_path, invocation_timeout_s=0),
+        runtime(fake_model, structured=graded()),
+    )
+
+    assert result.error is None
+    assert result.ingestion.sessions == 2
+    assert result.ingestion.budget_stops == ["s1: time", "s2: time"]
+    assert result.answer.stopped_by == "time"
+
+
+def test_model_calls_are_recorded_under_the_stage_that_made_them(
+    case, fake_model, tmp_path
+):
+    class RecordingModel(type(fake_model())):
+        """A scripted model that records each call, as `dma_bench.llm` does."""
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            record_call(CallRecord(model="recording"))
+            return super()._generate(messages, stop, run_manager, **kwargs)
+
+    result = run_case(
+        case,
+        config(tmp_path),
+        Runtime(
+            agent_model=lambda: RecordingModel(default_reply="Enterprise"),
+            judge_model=lambda: fake_model(structured=graded()),
+        ),
+    )
+
+    stages = [call.stage for call in result.llm_calls]
+    assert stages.count("ingestion") == 2
+    assert stages.count("answer:lexical") == 1
+
+
+def test_cases_are_reported_as_they_finish_and_kept_in_input_order(
+    case, monkeypatch, tmp_path
+):
+    from dma_bench import runner as runner_module
+
+    fast_reported = threading.Event()
+
+    def fake_run_case(case, config, runtime):  # noqa: ARG001
+        if case.question_id == "slow":
+            fast_reported.wait(timeout=5)
+        return CaseResult(question_id=case.question_id, category=case.category)
+
+    def report(result):
+        seen.append(result.question_id)
+        if result.question_id == "fast":
+            fast_reported.set()
+
+    monkeypatch.setattr(runner_module, "run_case", fake_run_case)
+    seen = []
+    slow = case.model_copy(update={"question_id": "slow"})
+    fast = case.model_copy(update={"question_id": "fast"})
+
+    experiment = run_experiment(
+        [slow, fast],
+        config(tmp_path, max_workers=2),
+        Runtime(agent_model=lambda: None, judge_model=lambda: None),
+        on_result=report,
+    )
+
+    assert seen == ["fast", "slow"]
+    assert [result.question_id for result in experiment.results] == ["slow", "fast"]

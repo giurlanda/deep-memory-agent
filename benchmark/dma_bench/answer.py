@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 
 from langchain_core.messages import AIMessage, ToolMessage
 
+from dma_bench.budget import budget_stop
 from dma_bench.clock import simulated_now
 from dma_bench.schema import AnswerRecord, TraceMessage
 
@@ -128,6 +129,7 @@ def answer_case(
         trace=trace,
         tool_calls=sum(len(step.tool_calls) for step in trace),
         duration_s=round(time.monotonic() - started, 2),
+        stopped_by=budget_stop(messages),
     )
 
 

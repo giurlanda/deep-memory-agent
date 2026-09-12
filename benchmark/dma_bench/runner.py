@@ -14,6 +14,12 @@ replayed keeps its memory tree, and only the answering arms it is still missing
 are run. Turning `semantic_search` on over a finished experiment therefore costs
 one index and one question per case, not the whole replay again.
 
+What failed is owed, not done. An arm whose answering or grading raised is run
+again on the next resume, and a replay that lost a session — to a dropped
+connection, usually — is redone from an empty tree. Recording a transient
+failure as final would turn one bad minute on the provider's side into a
+permanent hole in the results.
+
 A case runs its question twice when `semantic_search` is on: once through the
 shipped search agent, once through the same agent holding `semantic_search` as
 well, over the same tree. The lexical arm is not optional — a semantic number
@@ -23,8 +29,9 @@ with nothing beside it says nothing about whether the index helped.
 from __future__ import annotations
 
 import json
+import shutil
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,6 +39,8 @@ from typing import TYPE_CHECKING
 
 from dma_bench.agents import build_manager_agent, build_search_agent, open_store
 from dma_bench.answer import answer_case
+from dma_bench.budget import InvocationBudget
+from dma_bench.calls import call_stage, record_calls
 from dma_bench.categories import BenchCategory
 from dma_bench.ingest import ingest_case
 from dma_bench.judges.consolidation import judge_consolidation, snapshot_memory
@@ -191,10 +200,13 @@ def _load_previous(result_path: Path) -> CaseResult | None:
 def _ingestion_done(previous: CaseResult, case: Case, memory_dir: Path) -> bool:
     """Whether a previous result carries a finished replay of this history.
 
-    Every session has to have been attempted — a run killed halfway leaves a
+    Every session has to have been ingested — a run killed halfway leaves a
     record of the sessions it managed, and resuming from that would answer out
-    of half a memory. A session that raised counts as attempted: `ingest_case`
-    steps over it deliberately, and re-running the case would not bring it back.
+    of half a memory. A session that raised does not count: what makes one
+    raise is nearly always the connection, not the session, and a replay
+    missing it is a memory with a hole the question may fall into. Sessions the
+    invocation budget ended early do count — they ran, and wrote what they
+    wrote before the stop.
 
     Args:
         previous: The result found on disk.
@@ -204,8 +216,52 @@ def _ingestion_done(previous: CaseResult, case: Case, memory_dir: Path) -> bool:
     Returns:
         Whether the replay can be reused instead of paid for again.
     """
-    attempted = previous.ingestion.sessions + len(previous.ingestion.failed_sessions)
-    return attempted == len(case.sessions) and memory_dir.exists()
+    ingestion = previous.ingestion
+    return (
+        ingestion.sessions == len(case.sessions)
+        and not ingestion.failed_sessions
+        and memory_dir.exists()
+    )
+
+
+def _stage_owed(result: CaseResult) -> bool:
+    """Whether stage one — the snapshot and its verdict — has to be taken again."""
+    return result.error is not None or result.consolidation.error is not None
+
+
+def _arm_owed(arm: AnswerArm | CaseResult) -> bool:
+    """Whether an answering arm still has to be run.
+
+    Args:
+        arm: The arm — or a case result, whose top-level fields are the lexical
+            arm's.
+
+    Returns:
+        Whether it was never attempted, or was and failed: in answering, or in
+        any of the verdicts over the answer.
+    """
+    if not arm.answer.attempted or arm.answer.error is not None:
+        return True
+    verdicts = (arm.retrieval, arm.qa, arm.supersede_integrity)
+    return any(
+        verdict is not None and verdict.error is not None for verdict in verdicts
+    )
+
+
+def _semantic_owed(arm: SemanticArm | None) -> bool:
+    """Whether the semantic arm still has to be run, its index included."""
+    return arm is None or arm.index.error is not None or _arm_owed(arm)
+
+
+def _budget(config: RunConfig) -> list[InvocationBudget]:
+    """Return the per-invocation budget middleware the run asks for, if any."""
+    if config.invocation_timeout_s is None and config.max_model_calls is None:
+        return []
+    return [
+        InvocationBudget(
+            seconds=config.invocation_timeout_s, model_calls=config.max_model_calls
+        )
+    ]
 
 
 def _judge_arm(
@@ -213,6 +269,8 @@ def _judge_arm(
     case: Case,
     config: RunConfig,
     judge_model: BaseChatModel,
+    *,
+    arm_name: str,
 ) -> AnswerArm:
     """Ask the question through one agent and grade what came back.
 
@@ -221,26 +279,33 @@ def _judge_arm(
         case: The case being answered.
         config: The run configuration.
         judge_model: The grading model.
+        arm_name: `lexical` or `semantic`, which the model calls are recorded
+            under.
 
     Returns:
         The reply, the retrieval verdict and the QA verdict — plus the strict
         second reading on a knowledge-update case.
     """
-    answer = answer_case(
-        agent,
-        case,
-        chain_of_note=config.chain_of_note,
-        recursion_limit=config.recursion_limit,
-    )
-    arm = AnswerArm(
-        answer=answer,
-        retrieval=judge_retrieval(
-            judge_model, case, answer.trace, recall_threshold=config.recall_threshold
-        ),
-        qa=judge_answer(judge_model, case, answer.answer),
-    )
-    if case.category is BenchCategory.KNOWLEDGE_UPDATE and case.superseded_evidence:
-        arm.supersede_integrity = judge_supersede(judge_model, case, answer.answer)
+    with call_stage(f"answer:{arm_name}"):
+        answer = answer_case(
+            agent,
+            case,
+            chain_of_note=config.chain_of_note,
+            recursion_limit=config.recursion_limit,
+        )
+    with call_stage(f"judge:{arm_name}"):
+        arm = AnswerArm(
+            answer=answer,
+            retrieval=judge_retrieval(
+                judge_model,
+                case,
+                answer.trace,
+                recall_threshold=config.recall_threshold,
+            ),
+            qa=judge_answer(judge_model, case, answer.answer),
+        )
+        if case.category is BenchCategory.KNOWLEDGE_UPDATE and case.superseded_evidence:
+            arm.supersede_integrity = judge_supersede(judge_model, case, answer.answer)
     return arm
 
 
@@ -285,8 +350,9 @@ def _run_semantic_arm(
         embeddings=embeddings,
         vector_store=vector_store,
         search_k=config.semantic_search_k,
+        middleware=_budget(config),
     )
-    arm = _judge_arm(agent, case, config, judge_model)
+    arm = _judge_arm(agent, case, config, judge_model, arm_name="semantic")
     return SemanticArm(index=index, **arm.model_dump())
 
 
@@ -326,8 +392,9 @@ def run_case(case: Case, config: RunConfig, runtime: Runtime) -> CaseResult:
 
     What actually runs depends on what is already on disk. A case with a
     finished replay keeps its memory tree, its snapshot and its consolidation
-    verdict, and pays only for the answering arms it is missing — which is what
-    makes turning `semantic_search` on over a finished experiment affordable.
+    verdict, and pays only for the answering arms it is missing or that failed
+    — which is what makes turning `semantic_search` on over a finished
+    experiment affordable. A case without one is replayed from an empty tree.
 
     Args:
         case: The case to run.
@@ -348,60 +415,69 @@ def run_case(case: Case, config: RunConfig, runtime: Runtime) -> CaseResult:
     # A run that died left whatever it had reached, and stage one is the piece a
     # resumed case cannot tell apart from a default, so an errored case re-takes
     # it. That is one judge call over a tree already on disk, not a replay.
-    stage_pending = not reuse or result.error is not None
-    lexical_pending = not result.answer.attempted
+    stage_pending = not reuse or _stage_owed(result)
+    lexical_pending = _arm_owed(result)
     semantic_pending = (
-        config.semantic_search
-        and runtime.can_index
-        and (result.semantic is None or not result.semantic.answer.attempted)
+        config.semantic_search and runtime.can_index and _semantic_owed(result.semantic)
     )
     if not (stage_pending or lexical_pending or semantic_pending):
         return result
 
     result.error = None
-    try:
-        agent_model = runtime.agent_model()
-        judge_model = runtime.judge_model()
+    with record_calls() as calls:
+        try:
+            agent_model = runtime.agent_model()
+            judge_model = runtime.judge_model()
 
-        if not reuse:
-            manager = build_manager_agent(
-                agent_model,
-                memory_dir,
-                allow_consolidation=config.consolidation_mode != "none",
-            )
-            result.ingestion = ingest_case(
-                manager,
-                case,
-                memory_dir=memory_dir,
-                model=agent_model,
-                consolidation_mode=config.consolidation_mode,
-                consolidate_every_n=config.consolidate_every_n,
-                recursion_limit=config.recursion_limit,
-            )
+            if not reuse:
+                # Whatever is already there is part of an earlier attempt, and
+                # replaying on top of it would write each session it reached twice.
+                shutil.rmtree(memory_dir, ignore_errors=True)
+                manager = build_manager_agent(
+                    agent_model,
+                    memory_dir,
+                    allow_consolidation=config.consolidation_mode != "none",
+                    middleware=_budget(config),
+                )
+                with call_stage("ingestion"):
+                    result.ingestion = ingest_case(
+                        manager,
+                        case,
+                        memory_dir=memory_dir,
+                        model=agent_model,
+                        consolidation_mode=config.consolidation_mode,
+                        consolidate_every_n=config.consolidate_every_n,
+                        recursion_limit=config.recursion_limit,
+                    )
 
-        if stage_pending:
-            store = open_store(memory_dir)
-            result.memory_snapshot = snapshot_memory(store)
-            result.consolidation = judge_consolidation(judge_model, case, store)
+            if stage_pending:
+                store = open_store(memory_dir)
+                result.memory_snapshot = snapshot_memory(store)
+                with call_stage("judge:stage1"):
+                    result.consolidation = judge_consolidation(judge_model, case, store)
 
-        if lexical_pending:
-            arm = _judge_arm(
-                build_search_agent(agent_model, memory_dir),
-                case,
-                config,
-                judge_model,
-            )
-            result.answer = arm.answer
-            result.retrieval = arm.retrieval
-            result.qa = arm.qa
-            result.supersede_integrity = arm.supersede_integrity
+            if lexical_pending:
+                arm = _judge_arm(
+                    build_search_agent(
+                        agent_model, memory_dir, middleware=_budget(config)
+                    ),
+                    case,
+                    config,
+                    judge_model,
+                    arm_name="lexical",
+                )
+                result.answer = arm.answer
+                result.retrieval = arm.retrieval
+                result.qa = arm.qa
+                result.supersede_integrity = arm.supersede_integrity
 
-        if semantic_pending:
-            result.semantic = _run_semantic_arm(
-                case, config, runtime, memory_dir, agent_model, judge_model
-            )
-    except Exception as exc:
-        result.error = repr(exc)
+            if semantic_pending:
+                result.semantic = _run_semantic_arm(
+                    case, config, runtime, memory_dir, agent_model, judge_model
+                )
+        except Exception as exc:
+            result.error = repr(exc)
+    result.llm_calls = [*result.llm_calls, *calls.records]
 
     result_path.write_text(
         json.dumps(result.model_dump(mode="json"), indent=2, ensure_ascii=False)
@@ -447,17 +523,24 @@ def run_experiment(
     root.mkdir(parents=True, exist_ok=True)
     config = config.model_copy(update={"started_at": datetime.now(tz=UTC)})
 
-    results: list[CaseResult] = []
+    results: list[CaseResult | None] = [None] * len(cases)
     started = time.monotonic()
     with ThreadPoolExecutor(max_workers=max(config.max_workers, 1)) as pool:
-        for result in pool.map(lambda case: run_case(case, config, runtime), cases):
-            results.append(result)
+        futures = {
+            pool.submit(run_case, case, config, runtime): index
+            for index, case in enumerate(cases)
+        }
+        # Report cases as they finish. In submission order one slow case would
+        # hold back every case behind it, and make them all look slow.
+        for future in as_completed(futures):
+            result = future.result()
+            results[futures[future]] = result
             if on_result is not None:
                 on_result(result)
 
     experiment = ExperimentResult(
         config=config,
-        results=results,
+        results=[result for result in results if result is not None],
         summary=summarise(results),
         finished_at=datetime.now(tz=UTC),
     )
@@ -535,12 +618,8 @@ def _case_done(case: Case, config: RunConfig, root: Path) -> bool:
     """
     directory = root / case.question_id
     previous = _load_previous(directory / "result.json")
-    if previous is None or previous.error is not None:
+    if previous is None or not _ingestion_done(previous, case, directory / "memory"):
         return False
-    if not _ingestion_done(previous, case, directory / "memory"):
+    if _stage_owed(previous) or _arm_owed(previous):
         return False
-    if not previous.answer.attempted:
-        return False
-    return not config.semantic_search or (
-        previous.semantic is not None and previous.semantic.answer.attempted
-    )
+    return not config.semantic_search or not _semantic_owed(previous.semantic)

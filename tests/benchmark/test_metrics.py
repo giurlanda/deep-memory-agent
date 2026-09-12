@@ -1,11 +1,13 @@
 from dma_bench.categories import BenchCategory
 from dma_bench.metrics import CELL_DIAGNOSIS, cell_label, decompose, summarise
 from dma_bench.schema import (
+    CallRecord,
     CaseResult,
     IngestionRecord,
     MemorySnapshot,
     QaVerdict,
     RetrievalVerdict,
+    SemanticArm,
     StageVerdict,
 )
 
@@ -31,6 +33,49 @@ def result(
         qa=QaVerdict(correct=answer),
         **overrides,
     )
+
+
+def calls(*spec, stage="ingestion"):
+    return [
+        CallRecord(stage=stage, seconds=seconds, attempts=attempts, outcome=outcome)
+        for seconds, attempts, outcome in spec
+    ]
+
+
+def test_the_cost_shows_the_tail_of_the_model_calls_and_how_they_ended():
+    recorded = calls(
+        (1.0, 1, "ok"),
+        (2.0, 2, "ok"),
+        (30.0, 1, "truncated"),
+        (120.0, 3, "timeout"),
+        (5.0, 1, "error"),
+    )
+
+    cost = summarise([result(llm_calls=recorded)])["cost"]
+
+    assert cost["llm_calls"] == 5
+    assert cost["llm_seconds"] == 158.0
+    assert cost["llm_p95_call_s"] == cost["llm_max_call_s"] == 120.0
+    assert cost["llm_retried_calls"] == 2
+    assert cost["llm_truncated_calls"] == 1
+    assert cost["llm_timed_out_calls"] == 1
+    assert cost["llm_failed_calls"] == 1
+
+
+def test_a_run_without_recorded_calls_reports_no_call_cost():
+    assert "llm_calls" not in summarise([result()])["cost"]
+
+
+def test_the_semantic_summary_leaves_out_the_lexical_arms_calls():
+    recorded = [
+        CallRecord(stage=stage, seconds=1.0)
+        for stage in ("ingestion", "answer:lexical", "judge:lexical", "answer:semantic")
+    ]
+
+    summary = summarise([result(llm_calls=recorded, semantic=SemanticArm())])
+
+    assert summary["cost"]["llm_calls"] == 4
+    assert summary["semantic"]["cost"]["llm_calls"] == 2
 
 
 def test_every_combination_has_a_diagnosis():
