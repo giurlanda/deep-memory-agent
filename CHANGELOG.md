@@ -5,6 +5,34 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Benchmark: every model call is recorded in its case's `result.json` under
+  `llm_calls` — stage, seconds, attempts, tokens, finish reason, outcome — and
+  summarised in the cost table (`llm_p95_call_s`, `llm_max_call_s`, and the
+  retried, truncated and timed-out counts), so a slow case can be explained from
+  disk. Cases are reported as they finish rather than in submission order.
+  ([#13])
+
+### Fixed
+
+- Benchmark: a single model call, or a single agent invocation, can no longer
+  stall a run for tens of minutes. `dma_bench.llm.ResilientChatOpenAI` streams
+  every call under a hard deadline, is the only retry layer (transient failures
+  only, with exponential backoff), asks a reply cut off at its token budget
+  again with a larger budget up to a cap, and caps reasoning tokens.
+  `InvocationBudget` ends a session replay or an answer that spends its time or
+  model-call budget. The notebook configures agent and judge separately, their
+  `temperature` and `frequency_penalty` included. ([#13])
+- Benchmark: resume re-runs an answering arm whose answering or grading failed,
+  and replays a case that lost a session from an empty tree, instead of keeping
+  a transient failure as final. The judge no longer retries transport failures
+  on top of the model layer's own retries.
+
+[#13]: https://github.com/giurlanda/deep-memory-agent/issues/13
+
 ## [0.2.0] - 2026-09-01
 
 ### Added

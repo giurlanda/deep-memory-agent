@@ -32,8 +32,10 @@ from deep_memory_agent import (
 from deep_memory_agent.prompts import MANAGER_AGENT_PROMPT
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
+    from langchain.agents.middleware.types import AgentMiddleware
     from langchain_core.embeddings import Embeddings
     from langchain_core.language_models import BaseChatModel
     from langchain_core.vectorstores import VectorStore
@@ -47,6 +49,7 @@ def build_manager_agent(
     memory_dir: Path,
     *,
     allow_consolidation: bool,
+    middleware: Sequence[AgentMiddleware] = (),
 ) -> CompiledStateGraph:
     """Build the agent that replays sessions into memory.
 
@@ -55,13 +58,18 @@ def build_manager_agent(
         memory_dir: Directory holding this case's memory tree.
         allow_consolidation: Whether `memory_consolidate` is available. `False`
             builds the agent without it, so the cold arm cannot consolidate.
+        middleware: Extra middleware, e.g. the invocation budget. It bounds the
+            harness, not the agent's behaviour, so both arms get the same.
 
     Returns:
         The compiled manager agent.
     """
     if allow_consolidation:
         return create_memory_manager_agent(
-            model, memory_dir=memory_dir, consolidation_model=model
+            model,
+            memory_dir=memory_dir,
+            consolidation_model=model,
+            middleware=list(middleware),
         )
 
     backend = build_memory_backend(memory_dir)
@@ -75,6 +83,7 @@ def build_manager_agent(
         ],
         system_prompt=MANAGER_AGENT_PROMPT,
         backend=backend,
+        middleware=list(middleware),
         name="memory_manager_agent",
     )
 
@@ -86,6 +95,7 @@ def build_search_agent(
     embeddings: Embeddings | None = None,
     vector_store: VectorStore | None = None,
     search_k: int = 5,
+    middleware: Sequence[AgentMiddleware] = (),
 ) -> CompiledStateGraph:
     """Build the read-only agent that answers the question.
 
@@ -98,6 +108,8 @@ def build_search_agent(
             agent exactly as the package ships it by default.
         vector_store: The case's own index. Must be the one `index_case` wrote.
         search_k: Entries a semantic search returns by default.
+        middleware: Extra middleware, e.g. the invocation budget. Both arms
+            get the same, so it bounds the run without separating them.
 
     Returns:
         The compiled search agent. Nothing else about it is shaped here: the
@@ -110,6 +122,7 @@ def build_search_agent(
         embeddings=embeddings,
         vector_store=vector_store,
         search_k=search_k,
+        middleware=list(middleware),
     )
 
 

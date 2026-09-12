@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING
 
 from langchain_core.messages import AIMessage
 
+from dma_bench.budget import budget_stop
+from dma_bench.calls import call_stage
 from dma_bench.clock import simulated_now
 from dma_bench.schema import ConsolidationRecord, IngestionRecord
 
@@ -91,7 +93,7 @@ def consolidate(
     from deep_memory_agent import build_memory_backend, consolidate_memory
 
     try:
-        with simulated_now(moment):
+        with simulated_now(moment), call_stage("consolidation"):
             result = consolidate_memory(
                 build_memory_backend(memory_dir, for_deep_agent=False), model
             )
@@ -150,9 +152,12 @@ def ingest_case(
             continue
 
         record.sessions += 1
-        writes, consolidations = _count_tool_calls(state.get("messages", []))
+        messages = state.get("messages", [])
+        writes, consolidations = _count_tool_calls(messages)
         record.write_calls += writes
         record.unsolicited_consolidations += consolidations
+        if (reason := budget_stop(messages)) is not None:
+            record.budget_stops.append(f"{session.session_id}: {reason}")
 
         if periodic and (index + 1) % consolidate_every_n == 0:
             record.consolidations.append(

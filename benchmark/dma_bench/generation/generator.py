@@ -867,6 +867,16 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+_CALL_LIMITS = {
+    # A session is a few thousand tokens of structured output. These are generous
+    # for that, and still stop a generation that has lost its way.
+    "call_deadline_s": 600.0,
+    "max_output_tokens": 16384,
+    "max_output_tokens_cap": 32768,
+}
+"""The per-call bounds `dma_bench.llm` enforces on the generator's models."""
+
+
 def _build_validator(
     args: argparse.Namespace, factory: type[BaseChatModel]
 ) -> BaseChatModel:
@@ -891,8 +901,7 @@ def _build_validator(
         base_url=args.validator_base_url or args.base_url,
         api_key=args.validator_api_key or args.api_key,
         temperature=0,
-        timeout=240,
-        max_retries=2,
+        **_CALL_LIMITS,
     )
 
 
@@ -905,18 +914,17 @@ def main(argv: list[str] | None = None) -> int:
     Returns:
         Process exit code.
     """
-    from langchain_openai import ChatOpenAI
+    from dma_bench.llm import ResilientChatOpenAI
 
     args = _build_parser().parse_args(argv)
-    model = ChatOpenAI(
+    model = ResilientChatOpenAI(
         model=args.model,
         base_url=args.base_url,
         api_key=args.api_key,
         temperature=0.7,
-        timeout=240,
-        max_retries=2,
+        **_CALL_LIMITS,
     )
-    validator = _build_validator(args, ChatOpenAI) if args.validate else None
+    validator = _build_validator(args, ResilientChatOpenAI) if args.validate else None
     shape = CORPUS_SHAPES[args.config]
     per_category = args.cases_per_category or shape.cases_per_category
     if args.out.exists():

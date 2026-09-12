@@ -251,8 +251,44 @@ verdict, and pays only for the answering arms it is still missing — so an
 interrupted run picks up where it stopped, and turning `SEMANTIC_SEARCH_ENABLE`
 on over a finished experiment costs one index and one question per case rather
 than the whole replay again. A case that ends in an error is looked at again on
-the next run; a replay cut short halfway is redone from the start, because
-answering out of half a memory would score something that was never measured.
+the next run, and so is an arm whose answering or grading failed. A replay cut
+short halfway — or one that lost a session to a dropped connection — is redone
+from an empty tree, because answering out of half a memory would score something
+that was never measured.
+
+## Timeouts and budgets
+
+Left alone, a model call has no upper bound. The HTTP timeout trips on silence,
+not on duration, so a slow generation — or a router keeping the connection alive
+while a provider queues — is never cut off; the client then retries it twice
+more, and the judge retries that twice more. A reasoning model given no token
+budget can think for minutes and hand back an empty reply. On earlier runs that
+turned a 25-second answer into a nine-minute one, and a three-minute ingestion
+into nearly forty.
+
+Three layers bound it now, all set in the notebook's first cell:
+
+| Layer | Bound | Settings |
+| --- | --- | --- |
+| One attempt | Streamed on a worker thread and abandoned — connection closed — at the deadline. A silent server trips the read timeout sooner. | `CALL_DEADLINE_S`, `IDLE_TIMEOUT_S` |
+| One call | Transient failures (timeout, connection, 429, 5xx) retried with exponential backoff; this is the only retry layer. A reply cut off at its token budget is asked again with the budget doubled, up to a cap. Reasoning is capped below the budget. | `LLM_MAX_RETRIES`, `*_MAX_TOKENS`, `*_MAX_TOKENS_CAP`, `*_REASONING_MAX_TOKENS` |
+| One invocation | A session replay or an answer is ended — not raised — once it spends its time or its model calls. | `INVOCATION_TIMEOUT_S`, `MAX_MODEL_CALLS` |
+
+`AGENT_*` and `JUDGE_*` set the two roles apart, sampling included
+(`*_TEMPERATURE`, `*_FREQUENCY_PENALTY`). The model is
+`dma_bench.llm.ResilientChatOpenAI`, a `ChatOpenAI` subclass, so anything
+`ChatOpenAI` takes still works — `extra_body` for OpenRouter's provider routing,
+for one.
+
+What the bounds cost is on record. Each `result.json` lists every model call
+under `llm_calls` — stage, seconds, attempts, tokens, finish reason, outcome —
+and the cost table aggregates them: `llm_p95_call_s` and `llm_max_call_s` show
+the tail, and `llm_retried_calls`, `llm_truncated_calls` and
+`llm_timed_out_calls` say what it was made of. An answer the budget ended has
+`stopped_by` set, and a session it ended is listed under
+`ingestion.budget_stops`. Both are graded as they stand — a stopped answer is a
+wrong answer — and neither is retried on resume, since the same work would most
+likely overrun again.
 
 ## Semantic search
 
@@ -314,6 +350,9 @@ dma_bench/
 ├── clock.py         the simulated write clock
 ├── datasets/        longmemeval adapter + operational corpus loader
 ├── generation/      the operational ontology and its generator
+├── llm.py           the bounded chat model: deadline, retries, token budget
+├── calls.py         where model-call records go, stage by stage
+├── budget.py        the per-invocation time and model-call budget
 ├── agents.py        building the manager and search agents
 ├── ingest.py        replaying a history, session by session
 ├── semantic.py      indexing a finished tree for the second arm
